@@ -52,6 +52,7 @@ func New(deps Dependencies) *gin.Engine {
 		api.GET("/categories", categoryHandler.List)
 
 		itemHandler := handler.NewItemHandler(deps.MySQL)
+		api.GET("/items", middleware.Auth(deps.Config.JWT.Secret), itemHandler.List)
 		api.POST("/items", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Create)
 	}
 

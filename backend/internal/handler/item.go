@@ -55,6 +55,37 @@ type createItemResponse struct {
 	Images          []imageInfo `json:"images"`
 }
 
+type itemListResponse struct {
+	List     []itemSummary `json:"list"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+	Total    int64         `json:"total"`
+}
+
+type itemSummary struct {
+	ID              uint64       `json:"id"`
+	Category        categoryInfo `json:"category"`
+	Name            string       `json:"name"`
+	Remark          string       `json:"remark"`
+	CoverImage      string       `json:"cover_image"`
+	LatestLocation  string       `json:"latest_location"`
+	ReminderEnabled bool         `json:"reminder_enabled"`
+	ReminderDays    int          `json:"reminder_days"`
+	LastConfirmedAt *time.Time   `json:"last_confirmed_at"`
+	NextRemindAt    *time.Time   `json:"next_remind_at"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+}
+
+type categoryInfo struct {
+	ID          uint64 `json:"id"`
+	Name        string `json:"name"`
+	Code        string `json:"code"`
+	Icon        string `json:"icon"`
+	Description string `json:"description"`
+	Sort        int    `json:"sort"`
+}
+
 type recordInfo struct {
 	ID       uint64 `json:"id"`
 	Location string `json:"location"`
@@ -72,6 +103,88 @@ type imageInfo struct {
 
 func NewItemHandler(db *gorm.DB) *ItemHandler {
 	return &ItemHandler{db: db}
+}
+
+func (h *ItemHandler) List(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	page, err := parseOptionalInt(c.Query("page"), 1)
+	if err != nil || page <= 0 {
+		response.Error(c, response.CodeInvalidParams, "page must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	pageSize, err := parseOptionalInt(c.Query("page_size"), 10)
+	if err != nil || pageSize <= 0 {
+		response.Error(c, response.CodeInvalidParams, "page_size must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	query := h.db.WithContext(c.Request.Context()).Model(&model.Item{}).Where("items.user_id = ?", userID)
+
+	if strings.TrimSpace(c.Query("category_id")) != "" {
+		categoryID, err := strconv.ParseUint(strings.TrimSpace(c.Query("category_id")), 10, 64)
+		if err != nil || categoryID == 0 {
+			response.Error(c, response.CodeInvalidParams, "category_id must be a positive integer", http.StatusBadRequest)
+			return
+		}
+
+		query = query.Where("items.category_id = ?", categoryID)
+	}
+
+	if keyword := strings.TrimSpace(c.Query("keyword")); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where(
+			`items.name LIKE ?
+				OR items.remark LIKE ?
+				OR items.latest_location LIKE ?
+				OR EXISTS (
+					SELECT 1
+					FROM location_records
+					WHERE location_records.item_id = items.id
+						AND location_records.user_id = items.user_id
+						AND (location_records.location LIKE ? OR location_records.note LIKE ?)
+				)`,
+			like,
+			like,
+			like,
+			like,
+			like,
+		)
+	}
+
+	var total int64
+	if err := query.Session(&gorm.Session{}).Distinct("items.id").Count(&total).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "failed to count items", http.StatusInternalServerError)
+		return
+	}
+
+	var items []model.Item
+	if err := query.
+		Preload("Category").
+		Order("items.updated_at DESC").
+		Limit(pageSize).
+		Offset((page - 1) * pageSize).
+		Find(&items).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query items", http.StatusInternalServerError)
+		return
+	}
+
+	list := make([]itemSummary, 0, len(items))
+	for _, item := range items {
+		list = append(list, toItemSummary(item))
+	}
+
+	response.Success(c, itemListResponse{
+		List:     list,
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+	})
 }
 
 func (h *ItemHandler) Create(c *gin.Context) {
@@ -386,5 +499,29 @@ func randomFilename(ext string) (string, error) {
 func cleanupSavedPhotos(photos []savedPhoto) {
 	for _, photo := range photos {
 		_ = os.Remove(photo.Path)
+	}
+}
+
+func toItemSummary(item model.Item) itemSummary {
+	return itemSummary{
+		ID: item.ID,
+		Category: categoryInfo{
+			ID:          item.Category.ID,
+			Name:        item.Category.Name,
+			Code:        item.Category.Code,
+			Icon:        item.Category.Icon,
+			Description: item.Category.Description,
+			Sort:        item.Category.Sort,
+		},
+		Name:            item.Name,
+		Remark:          item.Remark,
+		CoverImage:      item.CoverImage,
+		LatestLocation:  item.LatestLocation,
+		ReminderEnabled: item.ReminderEnabled,
+		ReminderDays:    item.ReminderDays,
+		LastConfirmedAt: item.LastConfirmedAt,
+		NextRemindAt:    item.NextRemindAt,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
 	}
 }
