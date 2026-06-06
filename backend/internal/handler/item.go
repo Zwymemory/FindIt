@@ -77,6 +77,23 @@ type itemSummary struct {
 	UpdatedAt       time.Time    `json:"updated_at"`
 }
 
+type itemDetailResponse struct {
+	ID              uint64       `json:"id"`
+	Category        categoryInfo `json:"category"`
+	Name            string       `json:"name"`
+	Remark          string       `json:"remark"`
+	CoverImage      string       `json:"cover_image"`
+	LatestLocation  string       `json:"latest_location"`
+	ReminderEnabled bool         `json:"reminder_enabled"`
+	ReminderDays    int          `json:"reminder_days"`
+	LastConfirmedAt *time.Time   `json:"last_confirmed_at"`
+	NextRemindAt    *time.Time   `json:"next_remind_at"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+	Images          []imageInfo  `json:"images"`
+	LatestRecord    *recordInfo  `json:"latest_record"`
+}
+
 type categoryInfo struct {
 	ID          uint64 `json:"id"`
 	Name        string `json:"name"`
@@ -87,22 +104,111 @@ type categoryInfo struct {
 }
 
 type recordInfo struct {
-	ID       uint64 `json:"id"`
-	Location string `json:"location"`
-	PhotoURL string `json:"photo_url"`
-	Note     string `json:"note"`
-	Type     string `json:"type"`
+	ID        uint64      `json:"id"`
+	Location  string      `json:"location"`
+	PhotoURL  string      `json:"photo_url"`
+	Note      string      `json:"note"`
+	Type      string      `json:"type"`
+	CreatedAt time.Time   `json:"created_at"`
+	Images    []imageInfo `json:"images"`
 }
 
 type imageInfo struct {
-	ID       uint64 `json:"id"`
-	ImageURL string `json:"image_url"`
-	IsCover  bool   `json:"is_cover"`
-	Sort     int    `json:"sort"`
+	ID        uint64    `json:"id"`
+	ImageURL  string    `json:"image_url"`
+	IsCover   bool      `json:"is_cover"`
+	Sort      int       `json:"sort"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func NewItemHandler(db *gorm.DB) *ItemHandler {
 	return &ItemHandler{db: db}
+}
+
+func (h *ItemHandler) Detail(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	itemID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, "invalid item id", http.StatusBadRequest)
+		return
+	}
+
+	item, err := h.findOwnedItem(c, userID, itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, response.CodeNotFound, "item not found", http.StatusNotFound)
+			return
+		}
+
+		response.Error(c, response.CodeInternalError, "failed to query item", http.StatusInternalServerError)
+		return
+	}
+
+	images, err := h.findItemImages(c, item.ID)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query item images", http.StatusInternalServerError)
+		return
+	}
+
+	latestRecord, err := h.findLatestRecord(c, userID, item.ID)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query latest record", http.StatusInternalServerError)
+		return
+	}
+
+	response.Success(c, toItemDetail(item, images, latestRecord))
+}
+
+func (h *ItemHandler) History(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	itemID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, "invalid item id", http.StatusBadRequest)
+		return
+	}
+
+	item, err := h.findOwnedItem(c, userID, itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, response.CodeNotFound, "item not found", http.StatusNotFound)
+			return
+		}
+
+		response.Error(c, response.CodeInternalError, "failed to query item", http.StatusInternalServerError)
+		return
+	}
+
+	var records []model.LocationRecord
+	if err := h.db.WithContext(c.Request.Context()).
+		Where("item_id = ? AND user_id = ?", item.ID, userID).
+		Order("created_at DESC, id DESC").
+		Find(&records).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query history", http.StatusInternalServerError)
+		return
+	}
+
+	recordImages, err := h.findRecordImages(c, records)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query record images", http.StatusInternalServerError)
+		return
+	}
+
+	history := make([]recordInfo, 0, len(records))
+	for _, record := range records {
+		history = append(history, toRecordInfo(record, recordImages[record.ID]))
+	}
+
+	response.Success(c, history)
 }
 
 func (h *ItemHandler) List(c *gin.Context) {
@@ -341,10 +447,11 @@ func (h *ItemHandler) createItemInTransaction(c *gin.Context, userID uint64, cat
 	images := make([]imageInfo, 0, len(itemImages))
 	for _, image := range itemImages {
 		images = append(images, imageInfo{
-			ID:       image.ID,
-			ImageURL: image.ImageURL,
-			IsCover:  image.IsCover,
-			Sort:     image.Sort,
+			ID:        image.ID,
+			ImageURL:  image.ImageURL,
+			IsCover:   image.IsCover,
+			Sort:      image.Sort,
+			CreatedAt: image.CreatedAt,
 		})
 	}
 
@@ -361,11 +468,13 @@ func (h *ItemHandler) createItemInTransaction(c *gin.Context, userID uint64, cat
 		LastConfirmedAt: item.LastConfirmedAt,
 		NextRemindAt:    item.NextRemindAt,
 		LocationRecord: recordInfo{
-			ID:       locationRecord.ID,
-			Location: locationRecord.Location,
-			PhotoURL: locationRecord.PhotoURL,
-			Note:     locationRecord.Note,
-			Type:     locationRecord.Type,
+			ID:        locationRecord.ID,
+			Location:  locationRecord.Location,
+			PhotoURL:  locationRecord.PhotoURL,
+			Note:      locationRecord.Note,
+			Type:      locationRecord.Type,
+			CreatedAt: locationRecord.CreatedAt,
+			Images:    images,
 		},
 		Images: images,
 	}, nil
@@ -385,6 +494,15 @@ func parseRequiredUint(value string, name string) (uint64, error) {
 	parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
 	if err != nil || parsed == 0 {
 		return 0, fmt.Errorf("%s is required", name)
+	}
+
+	return parsed, nil
+}
+
+func parsePathID(value string) (uint64, error) {
+	parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	if err != nil || parsed == 0 {
+		return 0, fmt.Errorf("invalid id")
 	}
 
 	return parsed, nil
@@ -502,17 +620,83 @@ func cleanupSavedPhotos(photos []savedPhoto) {
 	}
 }
 
+func (h *ItemHandler) findOwnedItem(c *gin.Context, userID uint64, itemID uint64) (model.Item, error) {
+	var item model.Item
+	err := h.db.WithContext(c.Request.Context()).
+		Preload("Category").
+		Where("id = ? AND user_id = ?", itemID, userID).
+		First(&item).Error
+
+	return item, err
+}
+
+func (h *ItemHandler) findItemImages(c *gin.Context, itemID uint64) ([]model.ItemImage, error) {
+	var images []model.ItemImage
+	err := h.db.WithContext(c.Request.Context()).
+		Where("item_id = ?", itemID).
+		Order("sort ASC, id ASC").
+		Find(&images).Error
+
+	return images, err
+}
+
+func (h *ItemHandler) findLatestRecord(c *gin.Context, userID uint64, itemID uint64) (*recordInfo, error) {
+	var record model.LocationRecord
+	err := h.db.WithContext(c.Request.Context()).
+		Where("item_id = ? AND user_id = ?", itemID, userID).
+		Order("created_at DESC, id DESC").
+		First(&record).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	imagesByRecord, err := h.findRecordImages(c, []model.LocationRecord{record})
+	if err != nil {
+		return nil, err
+	}
+
+	latestRecord := toRecordInfo(record, imagesByRecord[record.ID])
+	return &latestRecord, nil
+}
+
+func (h *ItemHandler) findRecordImages(c *gin.Context, records []model.LocationRecord) (map[uint64][]imageInfo, error) {
+	recordImages := make(map[uint64][]imageInfo, len(records))
+	if len(records) == 0 {
+		return recordImages, nil
+	}
+
+	recordIDs := make([]uint64, 0, len(records))
+	for _, record := range records {
+		recordIDs = append(recordIDs, record.ID)
+	}
+
+	var images []model.ItemImage
+	if err := h.db.WithContext(c.Request.Context()).
+		Where("record_id IN ?", recordIDs).
+		Order("record_id ASC, sort ASC, id ASC").
+		Find(&images).Error; err != nil {
+		return nil, err
+	}
+
+	for _, image := range images {
+		if image.RecordID == nil {
+			continue
+		}
+
+		recordImages[*image.RecordID] = append(recordImages[*image.RecordID], toImageInfo(image))
+	}
+
+	return recordImages, nil
+}
+
 func toItemSummary(item model.Item) itemSummary {
 	return itemSummary{
-		ID: item.ID,
-		Category: categoryInfo{
-			ID:          item.Category.ID,
-			Name:        item.Category.Name,
-			Code:        item.Category.Code,
-			Icon:        item.Category.Icon,
-			Description: item.Category.Description,
-			Sort:        item.Category.Sort,
-		},
+		ID:              item.ID,
+		Category:        toCategoryInfo(item.Category),
 		Name:            item.Name,
 		Remark:          item.Remark,
 		CoverImage:      item.CoverImage,
@@ -523,5 +707,70 @@ func toItemSummary(item model.Item) itemSummary {
 		NextRemindAt:    item.NextRemindAt,
 		CreatedAt:       item.CreatedAt,
 		UpdatedAt:       item.UpdatedAt,
+	}
+}
+
+func toItemDetail(item model.Item, images []model.ItemImage, latestRecord *recordInfo) itemDetailResponse {
+	return itemDetailResponse{
+		ID:              item.ID,
+		Category:        toCategoryInfo(item.Category),
+		Name:            item.Name,
+		Remark:          item.Remark,
+		CoverImage:      item.CoverImage,
+		LatestLocation:  item.LatestLocation,
+		ReminderEnabled: item.ReminderEnabled,
+		ReminderDays:    item.ReminderDays,
+		LastConfirmedAt: item.LastConfirmedAt,
+		NextRemindAt:    item.NextRemindAt,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+		Images:          toImageInfos(images),
+		LatestRecord:    latestRecord,
+	}
+}
+
+func toRecordInfo(record model.LocationRecord, images []imageInfo) recordInfo {
+	if images == nil {
+		images = []imageInfo{}
+	}
+
+	return recordInfo{
+		ID:        record.ID,
+		Location:  record.Location,
+		PhotoURL:  record.PhotoURL,
+		Note:      record.Note,
+		Type:      record.Type,
+		CreatedAt: record.CreatedAt,
+		Images:    images,
+	}
+}
+
+func toCategoryInfo(category model.Category) categoryInfo {
+	return categoryInfo{
+		ID:          category.ID,
+		Name:        category.Name,
+		Code:        category.Code,
+		Icon:        category.Icon,
+		Description: category.Description,
+		Sort:        category.Sort,
+	}
+}
+
+func toImageInfos(images []model.ItemImage) []imageInfo {
+	result := make([]imageInfo, 0, len(images))
+	for _, image := range images {
+		result = append(result, toImageInfo(image))
+	}
+
+	return result
+}
+
+func toImageInfo(image model.ItemImage) imageInfo {
+	return imageInfo{
+		ID:        image.ID,
+		ImageURL:  image.ImageURL,
+		IsCover:   image.IsCover,
+		Sort:      image.Sort,
+		CreatedAt: image.CreatedAt,
 	}
 }

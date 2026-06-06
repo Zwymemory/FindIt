@@ -54,6 +54,8 @@ func New(deps Dependencies) *gin.Engine {
 		itemHandler := handler.NewItemHandler(deps.MySQL)
 		api.GET("/items", middleware.Auth(deps.Config.JWT.Secret), itemHandler.List)
 		api.POST("/items", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Create)
+		api.GET("/items/:id", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Detail)
+		api.GET("/items/:id/history", middleware.Auth(deps.Config.JWT.Secret), itemHandler.History)
 	}
 
 	r.Static("/uploads", "./uploads")
