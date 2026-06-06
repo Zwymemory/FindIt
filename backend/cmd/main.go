@@ -27,6 +27,14 @@ func main() {
 		log.Fatalf("connect mysql: %v", err)
 	}
 
+	if err := database.AutoMigrate(mysqlDB); err != nil {
+		log.Fatalf("auto migrate database: %v", err)
+	}
+
+	if err := database.SeedCategories(mysqlDB); err != nil {
+		log.Fatalf("seed categories: %v", err)
+	}
+
 	redisClient, err := database.NewRedis(cfg.Redis)
 	if err != nil {
 		log.Fatalf("connect redis: %v", err)

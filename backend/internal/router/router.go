@@ -38,6 +38,9 @@ func New(deps Dependencies) *gin.Engine {
 	api := r.Group("/api")
 	{
 		api.GET("/ping", handler.Ping)
+
+		categoryHandler := handler.NewCategoryHandler(deps.MySQL)
+		api.GET("/categories", categoryHandler.List)
 	}
 
 	r.NoRoute(func(c *gin.Context) {
