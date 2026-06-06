@@ -211,6 +211,52 @@ func (h *ItemHandler) History(c *gin.Context) {
 	response.Success(c, history)
 }
 
+func (h *ItemHandler) UpdateLocation(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	itemID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, "invalid item id", http.StatusBadRequest)
+		return
+	}
+
+	item, err := h.findOwnedItem(c, userID, itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, response.CodeNotFound, "item not found", http.StatusNotFound)
+			return
+		}
+
+		response.Error(c, response.CodeInternalError, "failed to query item", http.StatusInternalServerError)
+		return
+	}
+
+	location := strings.TrimSpace(c.PostForm("location"))
+	if location == "" {
+		response.Error(c, response.CodeInvalidParams, "location is required", http.StatusBadRequest)
+		return
+	}
+
+	photos, err := saveUploadedPhotos(c)
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	record, err := h.updateLocationInTransaction(c, item, userID, location, c.PostForm("note"), photos)
+	if err != nil {
+		cleanupSavedPhotos(photos)
+		response.Error(c, response.CodeInternalError, "failed to update location", http.StatusInternalServerError)
+		return
+	}
+
+	response.Success(c, record, http.StatusCreated)
+}
+
 func (h *ItemHandler) List(c *gin.Context) {
 	userID, ok := currentUserID(c)
 	if !ok {
@@ -478,6 +524,74 @@ func (h *ItemHandler) createItemInTransaction(c *gin.Context, userID uint64, cat
 		},
 		Images: images,
 	}, nil
+}
+
+func (h *ItemHandler) updateLocationInTransaction(c *gin.Context, item model.Item, userID uint64, location string, note string, photos []savedPhoto) (*recordInfo, error) {
+	now := time.Now()
+	var nextRemindAt *time.Time
+	if item.ReminderEnabled {
+		next := now.AddDate(0, 0, item.ReminderDays)
+		nextRemindAt = &next
+	}
+
+	photoURL := ""
+	if len(photos) > 0 {
+		photoURL = photos[0].URL
+	}
+
+	locationRecord := model.LocationRecord{
+		ItemID:    item.ID,
+		UserID:    userID,
+		Location:  location,
+		PhotoURL:  photoURL,
+		Note:      note,
+		Type:      "move",
+		CreatedAt: now,
+	}
+	itemImages := make([]model.ItemImage, 0, len(photos))
+
+	err := h.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&locationRecord).Error; err != nil {
+			return err
+		}
+
+		for i, photo := range photos {
+			itemImages = append(itemImages, model.ItemImage{
+				ItemID:    item.ID,
+				RecordID:  &locationRecord.ID,
+				UserID:    userID,
+				ImageURL:  photo.URL,
+				IsCover:   i == 0,
+				Sort:      i + 1,
+				CreatedAt: now,
+			})
+		}
+		if len(itemImages) > 0 {
+			if err := tx.Create(&itemImages).Error; err != nil {
+				return err
+			}
+		}
+
+		updates := map[string]any{
+			"latest_location":   location,
+			"last_confirmed_at": now,
+			"next_remind_at":    nextRemindAt,
+		}
+		if len(photos) > 0 {
+			updates["cover_image"] = photos[0].URL
+		}
+
+		return tx.Model(&model.Item{}).
+			Where("id = ? AND user_id = ?", item.ID, userID).
+			Updates(updates).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	images := toImageInfos(itemImages)
+	record := toRecordInfo(locationRecord, images)
+	return &record, nil
 }
 
 func currentUserID(c *gin.Context) (uint64, bool) {
