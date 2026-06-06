@@ -24,6 +24,7 @@ func New(deps Dependencies) *gin.Engine {
 	gin.SetMode(deps.Config.Server.Mode)
 
 	r := gin.New()
+	r.MaxMultipartMemory = 8 << 20
 	r.Use(gin.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(cors.New(cors.Config{
@@ -49,7 +50,12 @@ func New(deps Dependencies) *gin.Engine {
 
 		categoryHandler := handler.NewCategoryHandler(deps.MySQL)
 		api.GET("/categories", categoryHandler.List)
+
+		itemHandler := handler.NewItemHandler(deps.MySQL)
+		api.POST("/items", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Create)
 	}
+
+	r.Static("/uploads", "./uploads")
 
 	r.NoRoute(func(c *gin.Context) {
 		response.Error(c, response.CodeNotFound, "route not found", 404)
