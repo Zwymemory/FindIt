@@ -12,6 +12,7 @@ type Config struct {
 	Server ServerConfig `yaml:"server"`
 	MySQL  MySQLConfig  `yaml:"mysql"`
 	Redis  RedisConfig  `yaml:"redis"`
+	JWT    JWTConfig    `yaml:"jwt"`
 	CORS   CORSConfig   `yaml:"cors"`
 }
 
@@ -40,6 +41,19 @@ type RedisConfig struct {
 	Port     int    `yaml:"port"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
+}
+
+type JWTConfig struct {
+	Secret      string `yaml:"secret"`
+	ExpireHours int    `yaml:"expire_hours"`
+}
+
+func (c JWTConfig) ExpireDuration() time.Duration {
+	if c.ExpireHours <= 0 {
+		return 168 * time.Hour
+	}
+
+	return time.Duration(c.ExpireHours) * time.Hour
 }
 
 type CORSConfig struct {
@@ -89,6 +103,10 @@ func defaultConfig() *Config {
 			Host: "127.0.0.1",
 			Port: 6379,
 			DB:   0,
+		},
+		JWT: JWTConfig{
+			Secret:      "findit-dev-secret",
+			ExpireHours: 168,
 		},
 		CORS: CORSConfig{
 			AllowOrigins: []string{"http://localhost:5173", "http://127.0.0.1:5173"},

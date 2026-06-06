@@ -39,6 +39,14 @@ func New(deps Dependencies) *gin.Engine {
 	{
 		api.GET("/ping", handler.Ping)
 
+		authHandler := handler.NewAuthHandler(deps.MySQL, deps.Config.JWT)
+		auth := api.Group("/auth")
+		{
+			auth.POST("/register", authHandler.Register)
+			auth.POST("/login", authHandler.Login)
+			auth.GET("/profile", middleware.Auth(deps.Config.JWT.Secret), authHandler.Profile)
+		}
+
 		categoryHandler := handler.NewCategoryHandler(deps.MySQL)
 		api.GET("/categories", categoryHandler.List)
 	}
