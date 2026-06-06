@@ -1,0 +1,48 @@
+package router
+
+import (
+	"time"
+
+	"findit/backend/internal/config"
+	"findit/backend/internal/handler"
+	"findit/backend/internal/middleware"
+	"findit/backend/pkg/response"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
+)
+
+type Dependencies struct {
+	Config *config.Config
+	MySQL  *gorm.DB
+	Redis  *redis.Client
+}
+
+func New(deps Dependencies) *gin.Engine {
+	gin.SetMode(deps.Config.Server.Mode)
+
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(middleware.Recovery())
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     deps.Config.CORS.AllowOrigins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	api := r.Group("/api")
+	{
+		api.GET("/ping", handler.Ping)
+	}
+
+	r.NoRoute(func(c *gin.Context) {
+		response.Error(c, response.CodeNotFound, "route not found", 404)
+	})
+
+	return r
+}

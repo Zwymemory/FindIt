@@ -1,0 +1,5 @@
+.DS_Store
+.idea/
+
+backend/.gocache/
+backend/.gomodcache/
