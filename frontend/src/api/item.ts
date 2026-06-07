@@ -62,9 +62,7 @@ export const itemApi = {
   },
 
   create(formData: FormData) {
-    return request.post<unknown, ItemSummaryDTO>('/items', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    return request.post<unknown, ItemSummaryDTO>('/items', formData);
   },
 
   detail(id: number) {
@@ -76,15 +74,11 @@ export const itemApi = {
   },
 
   updateLocation(id: number, formData: FormData) {
-    return request.post<unknown, LocationRecordDTO>(`/items/${id}/location`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    return request.post<unknown, LocationRecordDTO>(`/items/${id}/location`, formData);
   },
 
   confirm(id: number, formData: FormData) {
-    return request.post<unknown, LocationRecordDTO>(`/items/${id}/confirm`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    return request.post<unknown, LocationRecordDTO>(`/items/${id}/confirm`, formData);
   },
 
   reminders() {

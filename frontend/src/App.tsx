@@ -160,6 +160,11 @@ const formatDateTime = (value?: string | null) => {
   });
 };
 
+interface PhotoDraft {
+  src: string;
+  file?: File;
+}
+
 interface AuthScreenProps {
   mode: 'login' | 'register';
   error: string | null;
@@ -384,14 +389,18 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   const [homeError, setHomeError] = useState<string | null>(null);
   const homeRequestSeq = useRef(0);
   const homePageSize = 10;
+  const [homeRefreshTick, setHomeRefreshTick] = useState(0);
   
   // Create / Edit overlay states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newItemName, setNewItemName] = useState('');
   const [newItemRemark, setNewItemRemark] = useState('');
   const [newItemLocation, setNewItemLocation] = useState('');
-  const [newItemIcon, setNewItemIcon] = useState('keys');
+  const [newItemNote, setNewItemNote] = useState('');
+  const [newItemIcon, setNewItemIcon] = useState('');
   const [newItemReminder, setNewItemReminder] = useState<number>(30); // Default 30 days
+  const [isCreatingItem, setIsCreatingItem] = useState(false);
+  const [createItemError, setCreateItemError] = useState<string | null>(null);
 
   // New location update overlay states
   const [isUpdateLocationOpen, setIsUpdateLocationOpen] = useState(false);
@@ -400,7 +409,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   const [updateLocationNote, setUpdateLocationNote] = useState('');
 
   // Primary visual asset and camera states
-  const [newItemPhotos, setNewItemPhotos] = useState<string[]>([]);
+  const [newItemPhotos, setNewItemPhotos] = useState<PhotoDraft[]>([]);
   const [updateLocationPhotos, setUpdateLocationPhotos] = useState<string[]>([]);
   const [activeLightboxImage, setActiveLightboxImage] = useState<string | null>(null);
   const [isCameraFlashing, setIsCameraFlashing] = useState(false);
@@ -425,7 +434,12 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
 
   useEffect(() => {
     categoryApi.list()
-      .then(setHomeCategories)
+      .then((categories) => {
+        setHomeCategories(categories);
+        if (categories.length > 0) {
+          setNewItemIcon((current) => current || String(categories[0].id));
+        }
+      })
       .catch((error) => {
         setHomeError(getAuthErrorMessage(error));
       });
@@ -466,7 +480,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [searchQuery, selectedBackendCategory, homePage]);
+  }, [searchQuery, selectedBackendCategory, homePage, homeRefreshTick]);
 
   // --- Core Utility Calculations ---
   // Today's simulated date for calculation (as defined by ADDITIONAL_METADATA): June 6th, 2026
@@ -525,12 +539,12 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
     const files = e.target.files;
     if (!files) return;
 
-    Array.from(files).forEach((file: any) => {
+    Array.from(files as FileList).forEach((file: File) => {
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
           if (isForNewItem) {
-            setNewItemPhotos((prev) => [...prev, reader.result as string]);
+            setNewItemPhotos((prev) => [...prev, { src: reader.result as string, file }]);
           } else {
             setUpdateLocationPhotos((prev) => [...prev, reader.result as string]);
           }
@@ -538,6 +552,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
       };
       reader.readAsDataURL(file);
     });
+    e.target.value = '';
     showNotification('物品最新实体图片已转译成极速本地缓存');
   };
 
@@ -556,7 +571,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
       const randomIndex = Math.floor(Math.random() * SIMULATED_SCENE_POOL.length);
       const mockPhoto = SIMULATED_SCENE_POOL[randomIndex];
       if (isForNewItem) {
-        setNewItemPhotos((prev) => [...prev, mockPhoto]);
+        setNewItemPhotos((prev) => [...prev, { src: mockPhoto }]);
       } else {
         setUpdateLocationPhotos((prev) => [...prev, mockPhoto]);
       }
@@ -565,51 +580,65 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   };
 
   // 1. Create New Item
-  const handleCreateItem = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newItemName.trim() || !newItemLocation.trim()) {
-      alert('请填写物品名称与当前最新位置');
-      return;
-    }
-
-    const createdTimeStr = SIMULATED_TODAY.toISOString();
-    
-    // Every LocationRecord must contain Location Description, photos, timestamp and note
-    const initialPhotos = newItemPhotos.length > 0 ? newItemPhotos : [getDefaultPhotoForIcon(newItemIcon)];
-
-    const newItem: Item = {
-      id: `item-${Date.now()}`,
-      name: newItemName.trim(),
-      remark: newItemRemark.trim(),
-      createdAt: createdTimeStr,
-      photo: newItemIcon,
-      latestLocation: newItemLocation.trim(),
-      lastConfirmedAt: createdTimeStr,
-      reminderDays: newItemReminder,
-      history: [
-        {
-          id: `rec-${Date.now()}-1`,
-          location: newItemLocation.trim(),
-          photos: initialPhotos,
-          timestamp: createdTimeStr,
-          note: newItemRemark.trim() || '首次登记录入随附初始位置照片凭据',
-          type: 'move',
-        },
-      ],
-    };
-
-    setItems((prev) => [newItem, ...prev]);
-    setIsCreateOpen(false);
-    
-    // Clear inputs and file cache
+  const resetCreateForm = () => {
     setNewItemName('');
     setNewItemRemark('');
     setNewItemLocation('');
-    setNewItemIcon('key');
+    setNewItemNote('');
+    setNewItemIcon(homeCategories[0] ? String(homeCategories[0].id) : '');
     setNewItemReminder(30);
     setNewItemPhotos([]);
+    setCreateItemError(null);
+  };
 
-    showNotification(`已新增物品「${newItem.name}」并捕获轨迹 📸`);
+  const handleCreateItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newItemName.trim() || !newItemLocation.trim()) {
+      setCreateItemError('请填写物品名称与当前最新位置');
+      return;
+    }
+    if (!newItemIcon) {
+      setCreateItemError('请先选择物品分类');
+      return;
+    }
+
+    const reminderEnabled = newItemReminder > 0;
+    const formData = new FormData();
+    formData.append('category_id', newItemIcon);
+    formData.append('name', newItemName.trim());
+    formData.append('remark', newItemRemark.trim());
+    formData.append('location', newItemLocation.trim());
+    formData.append('note', newItemNote.trim() || newItemRemark.trim() || '首次登记录入随附初始位置照片凭据');
+    formData.append('reminder_enabled', String(reminderEnabled));
+    formData.append('reminder_days', String(reminderEnabled ? newItemReminder : 30));
+    newItemPhotos.forEach((photo) => {
+      if (photo.file) {
+        formData.append('photos', photo.file);
+      }
+    });
+
+    setIsCreatingItem(true);
+    setCreateItemError(null);
+    try {
+      const createdItem = await itemApi.create(formData);
+      setIsCreateOpen(false);
+      resetCreateForm();
+      setActiveTab('home');
+      setSelectedItem(null);
+      setSearchQuery('');
+      setSelectedBackendCategory('all');
+      setHomePage(1);
+      setHomeRefreshTick((tick) => tick + 1);
+      showNotification(`已新增物品「${createdItem.name || newItemName.trim()}」并同步到后端`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onLogout();
+        return;
+      }
+      setCreateItemError(getAuthErrorMessage(error));
+    } finally {
+      setIsCreatingItem(false);
+    }
   };
 
   // 2. Confirm Item is Still in its place (Haptically Confirmed)
@@ -1827,9 +1856,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           type="button"
                           onClick={() => {
                             setIsCreateOpen(false);
-                            setNewItemName('');
-                            setNewItemRemark('');
-                            setNewItemLocation('');
+                            resetCreateForm();
                           }}
                           className="p-1 rounded-full bg-slate-200 text-slate-600"
                         >
@@ -1876,6 +1903,18 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           />
                         </div>
 
+                        {/* 3.5 Initial location note */}
+                        <div className="space-y-1">
+                          <label className="font-semibold text-slate-700 block">初始位置备注（选填）</label>
+                          <input
+                            type="text"
+                            placeholder="如：放在第二层左侧，旁边是相机包"
+                            value={newItemNote}
+                            onChange={(e) => setNewItemNote(e.target.value)}
+                            className="w-full bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900"
+                          />
+                        </div>
+
                         {/* 4. Redesigned Category Selector */}
                         <div className="space-y-1.5 animate-fadeIn">
                           <label className="font-bold text-slate-800 flex items-center gap-1.5">
@@ -1886,31 +1925,29 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                             请为此物品选定关联归类，系统已配置专属标志。
                           </p>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-0.5">
-                            {CATEGORY_SYSTEM.map((cat) => (
+                            {homeCategories.map((cat) => (
                               <button
                                 key={cat.id}
                                 type="button"
                                 onClick={() => {
-                                  setNewItemIcon(cat.id);
+                                  setNewItemIcon(String(cat.id));
                                   // Auto-recommend a sensible reminder interval if none set yet
-                                  if (cat.id === 'keys') setNewItemReminder(7);
-                                  else if (cat.id === 'photography' || cat.id === 'electronics') setNewItemReminder(14);
-                                  else if (cat.id === 'documents' || cat.id === 'files' || cat.id === 'valuables') setNewItemReminder(30);
+                                  if (cat.code === 'key') setNewItemReminder(7);
+                                  else if (cat.code === 'camera' || cat.code === 'electronics') setNewItemReminder(14);
+                                  else if (cat.code === 'document' || cat.code === 'file' || cat.code === 'valuable') setNewItemReminder(30);
                                 }}
                                 className={`p-2 rounded-xl border text-left flex items-start gap-2 transition-all duration-150 active:scale-[0.98] ${
-                                  newItemIcon === cat.id
+                                  newItemIcon === String(cat.id)
                                     ? 'bg-indigo-600 border-indigo-600 text-white shadow shadow-indigo-600/30'
                                     : 'bg-white hover:bg-slate-50 border-slate-200/80 text-slate-700'
                                 }`}
                               >
                                 <span className="text-lg shrink-0 mt-0.5">{cat.icon}</span>
                                 <div className="min-w-0 flex-1">
-                                  <span className={`text-[11px] font-bold block ${newItemIcon === cat.id ? 'text-white' : 'text-slate-800'}`}>{cat.name}</span>
-                                  {cat.examples.length > 0 && (
-                                    <span className={`text-[9px] block truncate mt-0.5 ${newItemIcon === cat.id ? 'text-white/80 font-medium' : 'text-slate-400 font-medium'}`}>
-                                      {cat.examples.join(' · ')}
-                                    </span>
-                                  )}
+                                  <span className={`text-[11px] font-bold block ${newItemIcon === String(cat.id) ? 'text-white' : 'text-slate-800'}`}>{cat.name}</span>
+                                  <span className={`text-[9px] block truncate mt-0.5 ${newItemIcon === String(cat.id) ? 'text-white/80 font-medium' : 'text-slate-400 font-medium'}`}>
+                                    {cat.description}
+                                  </span>
                                 </div>
                               </button>
                             ))}
@@ -1961,9 +1998,9 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           {/* Previews */}
                           {newItemPhotos.length > 0 ? (
                             <div className="grid grid-cols-4 gap-1.5 pt-1.5">
-                              {newItemPhotos.map((src, i) => (
+                              {newItemPhotos.map((photo, i) => (
                                 <div key={i} className="relative w-full aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-100 group animate-fadeIn">
-                                  <img src={src} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                  <img src={photo.src} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                                   <button
                                     type="button"
                                     onClick={() => setNewItemPhotos((prev) => prev.filter((_, idx) => idx !== i))}
@@ -1998,12 +2035,19 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                         </div>
                       </div>
 
+                      {createItemError && (
+                        <div className="bg-rose-50 border border-rose-100 text-rose-600 text-xs font-bold px-3 py-2 rounded-2xl">
+                          {createItemError}
+                        </div>
+                      )}
+
                       <div className="pt-3">
                         <button
                           type="submit"
-                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-colors"
+                          disabled={isCreatingItem}
+                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-colors"
                         >
-                          录入保管箱 & 记录初始轨迹 &rarr;
+                          {isCreatingItem ? '正在同步到后端...' : '录入保管箱 & 记录初始轨迹 →'}
                         </button>
                       </div>
                     </motion.form>
