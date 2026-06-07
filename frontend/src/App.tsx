@@ -54,9 +54,13 @@ import {
   setStoredToken,
   type AuthUser,
   type CategoryDTO,
+  type ItemDetailDTO,
+  type ItemImageDTO,
   type ItemSummaryDTO,
+  type LocationRecordDTO,
   type LoginPayload,
   type RegisterPayload,
+  type ReminderItemDTO,
 } from './api';
 
 const SIMULATED_SCENE_POOL = [
@@ -141,6 +145,12 @@ const backendCategoryToPrototypeCategory = (code?: string) => {
   }
 };
 
+const getCategoryGradient = (categoryID: string) => {
+  const cat = mapPhotoToCategory(categoryID);
+  const match = CATEGORY_SYSTEM.find((c) => c.id === cat);
+  return match ? match.color : 'from-slate-550 to-slate-700';
+};
+
 const resolveImageURL = (url?: string) => {
   if (!url) return '';
   if (url.startsWith('/uploads/')) return `${BACKEND_ORIGIN}${url}`;
@@ -164,6 +174,53 @@ interface PhotoDraft {
   src: string;
   file?: File;
 }
+
+interface RealItemDetailOverlayProps {
+  item: ItemDetailDTO | null;
+  history: LocationRecordDTO[];
+  isLoading: boolean;
+  isMutating: boolean;
+  error: string | null;
+  onClose: () => void;
+  onOpenImage: (url: string) => void;
+  onConfirm: () => void;
+  onOpenUpdate: () => void;
+}
+
+interface BackendUpdateTarget {
+  id: number;
+  name: string;
+  location: string;
+  source: 'detail' | 'reminder';
+}
+
+const recordTypeText: Record<LocationRecordDTO['type'], string> = {
+  create: '初始记录',
+  move: '更新位置',
+  confirm: '确认仍在',
+};
+
+const collectUniqueImages = (item: ItemDetailDTO | null, history: LocationRecordDTO[]) => {
+  const seen = new Set<string>();
+  const images: Array<{ image_url: string; location?: string; created_at?: string }> = [];
+
+  const add = (image: ItemImageDTO, location?: string, createdAt?: string) => {
+    if (!image.image_url || seen.has(image.image_url)) return;
+    seen.add(image.image_url);
+    images.push({
+      image_url: image.image_url,
+      location,
+      created_at: createdAt || image.created_at,
+    });
+  };
+
+  item?.images?.forEach((image) => add(image, item.latest_location, image.created_at));
+  history.forEach((record) => {
+    record.images?.forEach((image) => add(image, record.location, record.created_at));
+  });
+
+  return images;
+};
 
 interface AuthScreenProps {
   mode: 'login' | 'register';
@@ -357,6 +414,291 @@ function AuthScreen({ mode, error, isLoading, onModeChange, onLogin, onRegister 
   );
 }
 
+function RealItemDetailOverlay({
+  item,
+  history,
+  isLoading,
+  isMutating,
+  error,
+  onClose,
+  onOpenImage,
+  onConfirm,
+  onOpenUpdate,
+}: RealItemDetailOverlayProps) {
+  const prototypeCategory = backendCategoryToPrototypeCategory(item?.category?.code);
+  const galleryImages = collectUniqueImages(item, history);
+  const coverPhoto = resolveImageURL(item?.cover_image)
+    || resolveImageURL(item?.images?.[0]?.image_url)
+    || resolveImageURL(history.find((record) => record.images?.length > 0)?.images?.[0]?.image_url)
+    || '';
+
+  return (
+    <motion.div
+      initial={{ y: '100%' }}
+      animate={{ y: 0 }}
+      exit={{ y: '100%' }}
+      transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+      className="absolute inset-0 bg-[#F8FAFC] z-45 flex flex-col pt-12 pb-16"
+    >
+      <div className="h-12 bg-white border-b border-slate-200 flex items-center justify-between px-4 sticky top-0">
+        <button
+          onClick={onClose}
+          className="text-indigo-600 text-xs font-bold flex items-center gap-0.5 active:scale-95 transition-transform"
+        >
+          <ChevronRight className="w-4 h-4 rotate-180" />
+          返回
+        </button>
+        <h4 className="text-xs font-bold text-slate-800 text-center truncate max-w-[180px]">
+          物品详情
+        </h4>
+        <span className="w-8" />
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {isLoading ? (
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 text-center space-y-3">
+            <div className="w-3 h-3 rounded-full bg-indigo-600 animate-pulse mx-auto"></div>
+            <p className="text-xs font-bold text-slate-500">正在同步真实详情...</p>
+          </div>
+        ) : error ? (
+          <div className="bg-rose-50 rounded-2xl border border-rose-100 p-5 text-center space-y-2">
+            <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+            <p className="text-xs font-bold text-rose-600">{error}</p>
+          </div>
+        ) : item ? (
+          <>
+            <div className={`bg-gradient-to-tr ${getCategoryGradient(prototypeCategory)} rounded-2xl p-4 text-white flex flex-col items-center justify-center text-center shadow-md space-y-2 relative overflow-hidden`}>
+              <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-white/10 rounded-full blur-xl pointer-events-none"></div>
+              <div className="p-2.5 bg-white/10 rounded-full backdrop-blur-md shadow-inner text-2xl">
+                {item.category?.icon || '📦'}
+              </div>
+              <div>
+                <h4 className="text-sm font-extrabold tracking-tight">{item.name}</h4>
+                <p className="text-[9.5px] text-white/75 font-mono mt-0.5">
+                  {item.category?.name || '未分类'} · 建档时间: {formatDateTime(item.created_at)}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 animate-fadeIn">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">最新实地存放照片</span>
+              {coverPhoto ? (
+                <div className="relative rounded-2xl overflow-hidden border border-slate-200 group bg-slate-100 h-40">
+                  <img
+                    src={coverPhoto}
+                    alt="Current Location Photo"
+                    onClick={() => onOpenImage(coverPhoto)}
+                    className="w-full h-full object-cover cursor-zoom-in group-hover:scale-102 transition-transform duration-350"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 via-black/40 to-transparent p-3 flex items-end justify-between text-white">
+                    <div className="text-[10.5px] drop-shadow-md">
+                      <span className="font-extrabold">{item.latest_location}</span>
+                      <span className="block opacity-80 mt-0.5 text-[9px] font-mono">
+                        最近核对于 {formatDateTime(item.latest_record?.created_at || item.last_confirmed_at)}
+                      </span>
+                    </div>
+                    <span className="text-[9px] font-bold bg-white/20 backdrop-blur-md px-1.5 py-0.5 rounded leading-none shrink-0 border border-white/20">
+                      放大图
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-40 rounded-2xl border border-dashed border-slate-200 bg-white flex flex-col items-center justify-center text-center p-4">
+                  <Camera className="w-8 h-8 text-slate-300 mb-2" />
+                  <p className="text-xs font-bold text-slate-500">暂无实地照片</p>
+                  <p className="text-[10px] text-slate-400 mt-1">后续更新位置时可补充现场图像。</p>
+                </div>
+              )}
+            </div>
+
+            {galleryImages.length > 0 && (
+              <div className="bg-white rounded-2xl p-3 border border-slate-100 shadow-3xs space-y-1.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">历次位置足迹图像廊</span>
+                <div className="flex gap-2.5 overflow-x-auto pb-1 scrollbar-none">
+                  {galleryImages.map((image, index) => {
+                    const src = resolveImageURL(image.image_url);
+                    return (
+                      <div
+                        key={`${image.image_url}-${index}`}
+                        onClick={() => onOpenImage(src)}
+                        className="w-16 h-16 rounded-xl overflow-hidden relative border border-slate-200 shrink-0 group cursor-zoom-in bg-slate-50 transition-shadow active:scale-95"
+                      >
+                        <img
+                          src={src}
+                          alt={`History Photo ${index}`}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center p-1 text-center">
+                          <span className="text-[7.5px] text-white font-semibold truncate max-w-full">
+                            {image.location || '位置照片'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-xs space-y-3.5">
+              <div className="space-y-0.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">物品备注 & 用途描述</span>
+                <p className="text-xs text-slate-700 font-medium leading-relaxed">
+                  {item.remark ? item.remark : '该搜寻记录还未填写相关用途说明。'}
+                </p>
+              </div>
+
+              <div className="bg-indigo-50/50 p-3 rounded-2xl border border-indigo-200/50 space-y-1.5 shadow-inner">
+                <span className="text-[10px] text-indigo-500 font-bold uppercase tracking-wider flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5" />
+                  <span>当前所在最新位置 (Latest Spot)</span>
+                </span>
+                <p className="text-sm font-extrabold text-indigo-950 font-sans tracking-tight">
+                  {item.latest_location}
+                </p>
+                <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 font-medium border-t border-indigo-100/50">
+                  <span>上次核查时间:</span>
+                  <span className="font-bold text-indigo-700">{formatDateTime(item.last_confirmed_at)}</span>
+                </div>
+              </div>
+
+              {item.latest_record && (
+                <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200/60 space-y-1">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">最新历史节点</span>
+                  <p className="text-xs font-bold text-slate-800">
+                    {recordTypeText[item.latest_record.type]} · {item.latest_record.location}
+                  </p>
+                  {item.latest_record.note && (
+                    <p className="text-[10px] text-slate-400 italic">&ldquo;{item.latest_record.note}&rdquo;</p>
+                  )}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+                <div className="bg-slate-50 p-2 rounded-xl border border-slate-100">
+                  <span className="block text-[9px] text-slate-400 font-bold">提醒状态</span>
+                  <span className="font-extrabold text-slate-800">{item.reminder_enabled ? '已开启' : '已关闭'}</span>
+                </div>
+                <div className="bg-slate-50 p-2 rounded-xl border border-slate-100">
+                  <span className="block text-[9px] text-slate-400 font-bold">盘点周期</span>
+                  <span className="font-extrabold text-slate-800">每 {item.reminder_days} 天</span>
+                </div>
+                <div className="bg-slate-50 p-2 rounded-xl border border-slate-100 col-span-2">
+                  <span className="block text-[9px] text-slate-400 font-bold">下次提醒</span>
+                  <span className="font-extrabold text-slate-800">{formatDateTime(item.next_remind_at)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={onConfirm}
+                disabled={isMutating}
+                className="py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-500/20 text-center active:scale-[0.98] transition-all flex items-center justify-center gap-1 border-0"
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span>{isMutating ? '同步中...' : '原地核对完好'}</span>
+              </button>
+              <button
+                onClick={onOpenUpdate}
+                disabled={isMutating}
+                className="py-2.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white rounded-xl text-xs font-black shadow-md shadow-slate-900/10 text-center active:scale-[0.98] transition-all flex items-center justify-center gap-1 border-0"
+              >
+                <RotateCcw className="w-3.5 h-3.5 rotate-180" />
+                <span>更新位置</span>
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <h5 className="text-[11px] font-bold text-slate-800 uppercase tracking-widest flex items-center gap-1 pt-1">
+                <History className="w-3.5 h-3.5 text-slate-500" />
+                <span>位置变动历史链条 ({history.length})</span>
+              </h5>
+
+              <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-xs relative">
+                {history.length > 0 && (
+                  <div className="absolute left-[25px] top-[26px] bottom-[26px] w-[2px] border-l border-dashed border-slate-200"></div>
+                )}
+                <div className="space-y-4 relative">
+                  {history.length === 0 ? (
+                    <div className="text-center py-4">
+                      <p className="text-xs font-bold text-slate-500">暂无历史记录</p>
+                    </div>
+                  ) : (
+                    history.map((record) => {
+                      const isMove = record.type === 'move';
+                      const isConfirm = record.type === 'confirm';
+                      return (
+                        <div key={record.id} className="flex gap-3 items-start select-none">
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 z-10 p-0.5 shadow-sm ${
+                            isMove
+                              ? 'bg-indigo-50 border border-indigo-200 text-indigo-600'
+                              : isConfirm
+                                ? 'bg-emerald-50 border border-emerald-200 text-emerald-600'
+                                : 'bg-amber-50 border border-amber-200 text-amber-600'
+                          }`}>
+                            {isMove ? <MapPin className="w-3 h-3" /> : isConfirm ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                          </div>
+
+                          <div className="flex-1 min-w-0 pr-1 space-y-1">
+                            <div className="flex items-center justify-between text-[9px] text-slate-400">
+                              <span className="font-semibold">{formatDateTime(record.created_at)}</span>
+                              <span className={`px-1 py-0.1 rounded font-bold ${
+                                isMove ? 'bg-indigo-50 text-indigo-600' : isConfirm ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
+                              }`}>
+                                {recordTypeText[record.type]}
+                              </span>
+                            </div>
+                            <p className="text-xs font-bold text-slate-800">{record.location}</p>
+                            {record.note && (
+                              <p className="text-[10px] text-slate-400 italic">
+                                &ldquo;{record.note}&rdquo;
+                              </p>
+                            )}
+
+                            {record.images && record.images.length > 0 ? (
+                              <div className="flex gap-1.5 flex-wrap pt-1">
+                                {record.images.map((image) => {
+                                  const src = resolveImageURL(image.image_url);
+                                  return (
+                                    <div
+                                      key={image.id}
+                                      onClick={() => onOpenImage(src)}
+                                      className="w-14 h-14 rounded-lg overflow-hidden border border-slate-100 shrink-0 cursor-zoom-in bg-slate-50 relative group active:scale-95 duration-100 hover:border-slate-300"
+                                    >
+                                      <img
+                                        src={src}
+                                        alt={`timeline-${image.id}`}
+                                        className="w-full h-full object-cover"
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="inline-flex items-center gap-1 text-[9px] text-slate-400 bg-slate-50 border border-slate-100 px-2 py-1 rounded-lg mt-1">
+                                <Camera className="w-3 h-3" />
+                                <span>本条记录暂无图片</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </motion.div>
+  );
+}
+
 function MainApp({ currentUser, onLogout }: MainAppProps) {
   // --- Persistent Storage State ---
   const [items, setItems] = useState<Item[]>(() => {
@@ -383,13 +725,32 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   const [selectedItem, setSelectedItem] = useState<Item | null>(null);
   const [homeCategories, setHomeCategories] = useState<CategoryDTO[]>([]);
   const [homeItems, setHomeItems] = useState<ItemSummaryDTO[]>([]);
-  const [homePage, setHomePage] = useState(1);
   const [homeTotal, setHomeTotal] = useState(0);
   const [isHomeLoading, setIsHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | null>(null);
   const homeRequestSeq = useRef(0);
-  const homePageSize = 10;
+  const homePageSize = 5;
+  const warehousePageSize = 10;
   const [homeRefreshTick, setHomeRefreshTick] = useState(0);
+  const [warehouseItems, setWarehouseItems] = useState<ItemSummaryDTO[]>([]);
+  const [warehouseTotal, setWarehouseTotal] = useState(0);
+  const [inventoryTotal, setInventoryTotal] = useState(0);
+  const [warehouseKeyword, setWarehouseKeyword] = useState('');
+  const [warehousePage, setWarehousePage] = useState(1);
+  const [isWarehouseLoading, setIsWarehouseLoading] = useState(false);
+  const [warehouseError, setWarehouseError] = useState<string | null>(null);
+  const [warehouseRefreshTick, setWarehouseRefreshTick] = useState(0);
+  const [selectedBackendItemID, setSelectedBackendItemID] = useState<number | null>(null);
+  const [backendItemDetail, setBackendItemDetail] = useState<ItemDetailDTO | null>(null);
+  const [backendItemHistory, setBackendItemHistory] = useState<LocationRecordDTO[]>([]);
+  const [isBackendDetailLoading, setIsBackendDetailLoading] = useState(false);
+  const [backendDetailError, setBackendDetailError] = useState<string | null>(null);
+  const [backendDetailRefreshTick, setBackendDetailRefreshTick] = useState(0);
+  const [isBackendItemMutating, setIsBackendItemMutating] = useState(false);
+  const [reminderItems, setReminderItems] = useState<ReminderItemDTO[]>([]);
+  const [isRemindersLoading, setIsRemindersLoading] = useState(false);
+  const [remindersError, setRemindersError] = useState<string | null>(null);
+  const [remindersRefreshTick, setRemindersRefreshTick] = useState(0);
   
   // Create / Edit overlay states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -407,6 +768,12 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   const [targetUpdateItem, setTargetUpdateItem] = useState<Item | null>(null);
   const [updateLocationName, setUpdateLocationName] = useState('');
   const [updateLocationNote, setUpdateLocationNote] = useState('');
+  const [backendUpdateTarget, setBackendUpdateTarget] = useState<BackendUpdateTarget | null>(null);
+  const [backendUpdateLocation, setBackendUpdateLocation] = useState('');
+  const [backendUpdateNote, setBackendUpdateNote] = useState('');
+  const [backendUpdatePhotos, setBackendUpdatePhotos] = useState<PhotoDraft[]>([]);
+  const [isBackendUpdatingLocation, setIsBackendUpdatingLocation] = useState(false);
+  const [backendUpdateError, setBackendUpdateError] = useState<string | null>(null);
 
   // Primary visual asset and camera states
   const [newItemPhotos, setNewItemPhotos] = useState<PhotoDraft[]>([]);
@@ -446,10 +813,6 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   }, []);
 
   useEffect(() => {
-    setHomePage(1);
-  }, [searchQuery, selectedBackendCategory]);
-
-  useEffect(() => {
     const requestID = ++homeRequestSeq.current;
     const timer = window.setTimeout(() => {
       setIsHomeLoading(true);
@@ -457,8 +820,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
 
       itemApi.list({
         keyword: searchQuery.trim() || undefined,
-        category_id: selectedBackendCategory === 'all' ? undefined : Number(selectedBackendCategory),
-        page: homePage,
+        page: 1,
         page_size: homePageSize,
       })
         .then((result) => {
@@ -480,7 +842,104 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [searchQuery, selectedBackendCategory, homePage, homeRefreshTick]);
+  }, [searchQuery, homeRefreshTick]);
+
+  useEffect(() => {
+    if (!selectedBackendItemID) return;
+
+    setIsBackendDetailLoading(true);
+    setBackendDetailError(null);
+    setBackendItemDetail(null);
+    setBackendItemHistory([]);
+
+    Promise.all([
+      itemApi.detail(selectedBackendItemID),
+      itemApi.history(selectedBackendItemID),
+    ])
+      .then(([detail, history]) => {
+        setBackendItemDetail(detail);
+        setBackendItemHistory(history);
+      })
+      .catch((error) => {
+        if (error instanceof ApiError && error.status === 401) {
+          onLogout();
+          return;
+        }
+        setBackendDetailError(getAuthErrorMessage(error));
+      })
+      .finally(() => {
+        setIsBackendDetailLoading(false);
+      });
+  }, [selectedBackendItemID, backendDetailRefreshTick, onLogout]);
+
+  useEffect(() => {
+    if (activeTab !== 'reminders' && activeTab !== 'items' && activeTab !== 'home') return;
+
+    setIsRemindersLoading(true);
+    setRemindersError(null);
+
+    itemApi.reminders()
+      .then((items) => {
+        setReminderItems(items);
+      })
+      .catch((error) => {
+        if (error instanceof ApiError && error.status === 401) {
+          onLogout();
+          return;
+        }
+        setReminderItems([]);
+        setRemindersError(getAuthErrorMessage(error));
+      })
+      .finally(() => {
+        setIsRemindersLoading(false);
+      });
+  }, [activeTab, remindersRefreshTick, onLogout]);
+
+  useEffect(() => {
+    setWarehousePage(1);
+  }, [warehouseKeyword, selectedBackendCategory]);
+
+  useEffect(() => {
+    if (activeTab !== 'items') return;
+
+    setIsWarehouseLoading(true);
+    setWarehouseError(null);
+
+    itemApi.list({
+      keyword: warehouseKeyword.trim() || undefined,
+      category_id: selectedBackendCategory === 'all' ? undefined : Number(selectedBackendCategory),
+      page: warehousePage,
+      page_size: warehousePageSize,
+    })
+      .then((result) => {
+        setWarehouseItems(result.list);
+        setWarehouseTotal(result.total);
+      })
+      .catch((error) => {
+        if (error instanceof ApiError && error.status === 401) {
+          onLogout();
+          return;
+        }
+        setWarehouseItems([]);
+        setWarehouseTotal(0);
+        setWarehouseError(getAuthErrorMessage(error));
+      })
+      .finally(() => {
+        setIsWarehouseLoading(false);
+      });
+  }, [activeTab, warehouseKeyword, selectedBackendCategory, warehousePage, warehouseRefreshTick, onLogout]);
+
+  useEffect(() => {
+    itemApi.list({ page: 1, page_size: 1 })
+      .then((result) => {
+        setInventoryTotal(result.total);
+      })
+      .catch((error) => {
+        if (error instanceof ApiError && error.status === 401) {
+          onLogout();
+        }
+      });
+  }, [homeRefreshTick, warehouseRefreshTick, onLogout]);
 
   // --- Core Utility Calculations ---
   // Today's simulated date for calculation (as defined by ADDITIONAL_METADATA): June 6th, 2026
@@ -524,7 +983,22 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
     return items.filter(isItemOverdue);
   }, [items]);
 
+  const dueReminderCount = reminderItems.length;
+  const safeWarehouseCount = Math.max(0, inventoryTotal - dueReminderCount);
+  const homeSearchActive = searchQuery.trim().length > 0;
+  const homeReminderPreview = reminderItems.slice(0, 3);
+  const homePreviewItems = homeItems.slice(0, homeSearchActive ? homeItems.length : 5);
+
   // --- Interaction Handlers ---
+  const openWarehouse = (options?: { categoryID?: string; keyword?: string }) => {
+    setSelectedBackendCategory(options?.categoryID || 'all');
+    setWarehouseKeyword(options?.keyword || '');
+    setWarehousePage(1);
+    setActiveTab('items');
+    setSelectedItem(null);
+    setSelectedBackendItemID(null);
+  };
+
   const handleResetData = () => {
     if (window.confirm('是否重置模拟数据为初始优雅种子状态？')) {
       setItems(SEED_ITEMS);
@@ -535,7 +1009,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
   };
 
   // --- Visual Memory & Camera Simulation Utilities ---
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>, isForNewItem = true) => {
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'new' | 'mock-update' | 'backend-update' = 'new') => {
     const files = e.target.files;
     if (!files) return;
 
@@ -543,8 +1017,10 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
-          if (isForNewItem) {
+          if (target === 'new') {
             setNewItemPhotos((prev) => [...prev, { src: reader.result as string, file }]);
+          } else if (target === 'backend-update') {
+            setBackendUpdatePhotos((prev) => [...prev, { src: reader.result as string, file }]);
           } else {
             setUpdateLocationPhotos((prev) => [...prev, reader.result as string]);
           }
@@ -627,8 +1103,9 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
       setSelectedItem(null);
       setSearchQuery('');
       setSelectedBackendCategory('all');
-      setHomePage(1);
       setHomeRefreshTick((tick) => tick + 1);
+      setWarehouseRefreshTick((tick) => tick + 1);
+      setRemindersRefreshTick((tick) => tick + 1);
       showNotification(`已新增物品「${createdItem.name || newItemName.trim()}」并同步到后端`);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -768,6 +1245,92 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
       setItems((prev) => prev.filter((item) => item.id !== itemId));
       setSelectedItem(null);
       showNotification('物品及历史溯源记录已被永久移除');
+    }
+  };
+
+  const refreshBackendItemSurfaces = (itemID?: number) => {
+    if (itemID && selectedBackendItemID === itemID) {
+      setBackendDetailRefreshTick((tick) => tick + 1);
+    }
+    setHomeRefreshTick((tick) => tick + 1);
+    setWarehouseRefreshTick((tick) => tick + 1);
+    setRemindersRefreshTick((tick) => tick + 1);
+  };
+
+  const openBackendUpdateLocation = (target: BackendUpdateTarget) => {
+    setBackendUpdateTarget(target);
+    setBackendUpdateLocation('');
+    setBackendUpdateNote('');
+    setBackendUpdatePhotos([]);
+    setBackendUpdateError(null);
+  };
+
+  const closeBackendUpdateLocation = () => {
+    setBackendUpdateTarget(null);
+    setBackendUpdateLocation('');
+    setBackendUpdateNote('');
+    setBackendUpdatePhotos([]);
+    setBackendUpdateError(null);
+  };
+
+  const handleBackendConfirm = async (itemID: number, source: 'detail' | 'reminder' = 'detail') => {
+    setIsBackendItemMutating(true);
+    try {
+      const formData = new FormData();
+      formData.append('note', '原地确认，物品仍在该位置');
+      await itemApi.confirm(itemID, formData);
+      refreshBackendItemSurfaces(itemID);
+      if (source === 'reminder') {
+        setReminderItems((prev) => prev.filter((item) => item.id !== itemID));
+      }
+      showNotification('已完成原地核对，提醒时间已刷新');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onLogout();
+        return;
+      }
+      showNotification(getAuthErrorMessage(error));
+    } finally {
+      setIsBackendItemMutating(false);
+    }
+  };
+
+  const handleBackendUpdateLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!backendUpdateTarget) return;
+    if (!backendUpdateLocation.trim()) {
+      setBackendUpdateError('请输入新的存放位置');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('location', backendUpdateLocation.trim());
+    formData.append('note', backendUpdateNote.trim());
+    backendUpdatePhotos.forEach((photo) => {
+      if (photo.file) {
+        formData.append('photos', photo.file);
+      }
+    });
+
+    setIsBackendUpdatingLocation(true);
+    setBackendUpdateError(null);
+    try {
+      await itemApi.updateLocation(backendUpdateTarget.id, formData);
+      const { id, source, name } = backendUpdateTarget;
+      closeBackendUpdateLocation();
+      refreshBackendItemSurfaces(id);
+      if (source === 'reminder') {
+        setReminderItems((prev) => prev.filter((item) => item.id !== id));
+      }
+      showNotification(`已更新「${name}」的位置`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onLogout();
+        return;
+      }
+      setBackendUpdateError(getAuthErrorMessage(error));
+    } finally {
+      setIsBackendUpdatingLocation(false);
     }
   };
 
@@ -1039,9 +1602,14 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                       </div>
 
                       {/* Micro Brand Glyphs (Magnifying glass + Key) */}
-                      <div className="w-10 h-10 bg-indigo-600 rounded-2xl shadow-xs flex items-center justify-center text-white">
+                      <button
+                        type="button"
+                        onClick={() => setIsCreateOpen(true)}
+                        className="w-10 h-10 bg-indigo-600 hover:bg-indigo-700 rounded-2xl shadow-xs flex items-center justify-center text-white active:scale-95 transition-all"
+                        title="添加物品"
+                      >
                         <Key className="w-5 h-5 text-white" />
-                      </div>
+                      </button>
                     </div>
 
                     {/* Apple Style search bar */}
@@ -1064,27 +1632,19 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                       )}
                     </div>
 
-                     {/* Quick Horizontal filters */}
+                    {/* Quick Warehouse category shortcuts */}
                     <div className="flex gap-1.5 overflow-x-auto py-1 scrollbar-none">
                       <button
-                        onClick={() => setSelectedBackendCategory('all')}
-                        className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 ${
-                          selectedBackendCategory === 'all'
-                            ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
-                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                        }`}
+                        onClick={() => openWarehouse({ categoryID: 'all' })}
+                        className="px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
                       >
-                        🗂️ 全部
+                        🗂️ 全部物品
                       </button>
                       {homeCategories.map((cat) => (
                         <button
                           key={cat.id}
-                          onClick={() => setSelectedBackendCategory(String(cat.id))}
-                          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 ${
-                            selectedBackendCategory === String(cat.id)
-                              ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
-                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                          }`}
+                          onClick={() => openWarehouse({ categoryID: String(cat.id) })}
+                          className="px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
                         >
                           <span className="text-[13px]">{cat.icon}</span>
                           <span>{cat.name}</span>
@@ -1092,34 +1652,70 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                       ))}
                     </div>
 
-                    {/* --- REMINDER ALERTS SECTION: 🚨 位置待核实 (Action Needed) --- */}
-                    {overdueItems.length > 0 && !searchQuery && (
+                    {/* --- ACTION CENTER: REAL REMINDERS --- */}
+                    {!homeSearchActive && (
                       <div className="space-y-2.5">
                         <div className="flex items-center justify-between px-1">
                           <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
                             <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
-                            需要盘点核核 ({overdueItems.length})
+                            需要盘点核对
                           </h4>
-                          <span className="text-[10px] text-slate-400 font-semibold font-mono">已超期未核实</span>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab('reminders')}
+                            className="text-[10px] text-indigo-600 font-bold"
+                          >
+                            查看全部
+                          </button>
                         </div>
 
-                        {/* Staggered dynamic slider for overdue items */}
-                        <div className="space-y-3">
-                          {overdueItems.map((item) => (
+                        {remindersError ? (
+                          <div className="bg-rose-50 rounded-2xl border border-rose-100 p-4 text-center space-y-1">
+                            <AlertTriangle className="w-7 h-7 text-rose-400 mx-auto" />
+                            <p className="text-xs font-bold text-rose-600">{remindersError}</p>
+                          </div>
+                        ) : isRemindersLoading ? (
+                          <div className="bg-white rounded-2xl border border-slate-100 p-5 text-center space-y-2">
+                            <div className="w-3 h-3 rounded-full bg-rose-500 animate-pulse mx-auto"></div>
+                            <p className="text-xs font-semibold text-slate-500">正在同步待核对物品...</p>
+                          </div>
+                        ) : homeReminderPreview.length === 0 ? (
+                          <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-5 text-center space-y-2">
+                            <CheckSquare className="w-8 h-8 text-emerald-300 mx-auto" />
+                            <p className="text-xs font-semibold text-slate-600">当前没有需要核对的物品</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {homeReminderPreview.map((item) => {
+                              const reminderPhoto = resolveImageURL(item.cover_image) || getDefaultPhotoForIcon(backendCategoryToPrototypeCategory(item.category?.code));
+                              return (
                             <div
                               key={item.id}
+                              onClick={() => {
+                                setSelectedItem(null);
+                                setSelectedBackendItemID(item.id);
+                              }}
                               className="bg-white rounded-2xl border-l-[5px] border-l-rose-500 border border-slate-200 p-3.5 shadow-sm space-y-2.5 relative hover:border-slate-300 transition-colors"
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex items-center gap-2">
-                                  <div className={`w-8 h-8 rounded-xl bg-gradient-to-tr ${getIconGradient(item.photo)} flex items-center justify-center text-white p-1 hover:scale-105 transition-transform`}>
-                                    {renderIconComponent(item.photo, 'w-4 h-4 text-white')}
+                                  <div className="w-9 h-9 rounded-xl overflow-hidden border border-slate-200 shrink-0 shadow-3xs relative bg-slate-50">
+                                    <img
+                                      src={reminderPhoto}
+                                      alt={item.name}
+                                      className="w-full h-full object-cover"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                    <div className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-md bg-slate-900 text-white flex items-center justify-center p-0.5 shadow-xs border border-white scale-80">
+                                      <span className="text-[9px] leading-none">{item.category?.icon || '📦'}</span>
+                                    </div>
                                   </div>
                                   <div>
                                     <h5 className="text-[13px] font-bold text-slate-800 line-clamp-1">{item.name}</h5>
-                                    <p className="text-[10px] text-slate-400 font-medium">上次确认: {getDaysSinceLastConfirm(item)} 天前</p>
+                                    <p className="text-[10px] text-slate-400 font-medium">逾期 {item.overdue_days} 天未核对</p>
                                   </div>
                                 </div>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0 mt-1" />
                               </div>
 
                               <div className="bg-slate-50/80 p-2 rounded-lg border border-slate-200/30 text-xs">
@@ -1127,71 +1723,62 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                                   <MapPin className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
                                   <div>
                                     <span className="text-slate-400 font-medium">登记位置：</span>
-                                    <span className="font-extrabold text-slate-950 font-sans tracking-tight">{item.latestLocation}</span>
+                                    <span className="font-extrabold text-slate-950 font-sans tracking-tight">{item.latest_location}</span>
                                   </div>
                                 </div>
                               </div>
 
-                              <div className="text-[11px] font-semibold text-slate-500 text-center py-1">
-                                📢 物品已存放过久，确认还在同样位置吗？
-                              </div>
-
-                              {/* Interactive Action Buttons */}
-                              <div className="grid grid-cols-3 gap-1.5 pt-1.5 border-t border-slate-100">
+                              <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-100">
                                 <button
-                                  onClick={() => handleConfirmStillHere(item.id)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleBackendConfirm(item.id, 'reminder');
+                                  }}
+                                  disabled={isBackendItemMutating}
                                   className="py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
                                 >
                                   <Check className="w-3 h-3" />
-                                  还在原位
+                                  原地核对
                                 </button>
                                 <button
-                                  onClick={() => openMoveLocationDrawer(item)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openBackendUpdateLocation({
+                                      id: item.id,
+                                      name: item.name,
+                                      location: item.latest_location,
+                                      source: 'reminder',
+                                    });
+                                  }}
+                                  disabled={isBackendItemMutating}
                                   className="py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
                                 >
                                   <RefreshCw className="w-3 h-3" />
-                                  更新地点
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    // Postpone reminder
-                                    setItems((prev) =>
-                                      prev.map((it) => {
-                                        if (it.id === item.id) {
-                                          return {
-                                            ...it,
-                                            // virtual 7 days forward postponement
-                                            lastConfirmedAt: new Date(
-                                              new Date(it.lastConfirmedAt).getTime() + 1000 * 60 * 60 * 24 * 7
-                                            ).toISOString(),
-                                          };
-                                        }
-                                        return it;
-                                      })
-                                    );
-                                    showNotification('已选择延后核时，7天后再提醒');
-                                  }}
-                                  className="py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-400 rounded-lg text-[11px] font-medium transition-colors"
-                                >
-                                  稍后提醒
+                                  更新位置
                                 </button>
                               </div>
                             </div>
-                          ))}
-                        </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
 
-                    {/* --- RECENTLY UPDATED ITEMS SECTION --- */}
+                    {/* --- QUICK SEARCH RESULTS / RECENT ITEMS SECTION --- */}
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between px-1">
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1">
                           <CheckSquare className="w-4 h-4 text-slate-500" />
-                          <span>物品实时记录 ({homeTotal})</span>
+                          <span>{homeSearchActive ? `搜索结果 (${homeTotal})` : '最近记录'}</span>
                         </h4>
-                        <span className="text-[10px] text-slate-400 font-semibold font-mono">
-                          {selectedBackendCategory !== 'all' ? `分类下筛选` : `第${homePage}页`}
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() => openWarehouse({ keyword: homeSearchActive ? searchQuery.trim() : '' })}
+                          className="text-[10px] text-indigo-600 font-bold"
+                        >
+                          {homeSearchActive ? '查看更多' : '全部物品'}
+                        </button>
                       </div>
 
                       {homeError ? (
@@ -1204,21 +1791,24 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           <div className="w-3 h-3 rounded-full bg-indigo-600 animate-pulse mx-auto"></div>
                           <p className="text-xs font-semibold text-slate-500">正在同步真实物品记录...</p>
                         </div>
-                      ) : homeItems.length === 0 ? (
+                      ) : homePreviewItems.length === 0 ? (
                         <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center space-y-2">
                           <MapPin className="w-8 h-8 text-slate-300 mx-auto" />
-                          {homeTotal === 0 && !searchQuery.trim() && selectedBackendCategory === 'all' ? (
-                            <p className="text-xs font-semibold text-slate-600">还没有记录物品，点击右上角钥匙按钮添加第一个物品。</p>
-                          ) : (
+                          {homeSearchActive ? (
                             <>
                               <p className="text-xs font-semibold text-slate-600">没有找到匹配检索的物品</p>
-                              <p className="text-[10px] text-slate-400">试着换一换搜索词或分类筛选条件</p>
+                              <p className="text-[10px] text-slate-400">可以进入物品仓继续组合筛选</p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs font-semibold text-slate-600">还没有记录物品，点击右上角钥匙按钮添加第一个物品。</p>
+                              <p className="text-[10px] text-slate-400">这里之后会显示最近 5 条记录。</p>
                             </>
                           )}
                         </div>
                       ) : (
                         <div className="space-y-2.5">
-                          {homeItems.map((item) => {
+                          {homePreviewItems.map((item) => {
                             const prototypeCategory = backendCategoryToPrototypeCategory(item.category?.code);
                             const latestPhoto = resolveImageURL(item.cover_image) || getDefaultPhotoForIcon(prototypeCategory);
                             const lastUpdateTimeStr = formatDateTime(item.last_confirmed_at);
@@ -1226,7 +1816,10 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                             return (
                               <div
                                 key={item.id}
-                                onClick={() => showNotification('详情接口将在下一阶段接入')}
+                                onClick={() => {
+                                  setSelectedItem(null);
+                                  setSelectedBackendItemID(item.id);
+                                }}
                                 className="bg-white rounded-2xl border border-slate-100 p-3 flex items-start gap-3 hover:border-slate-300 hover:shadow-sm transition-all cursor-pointer group active:scale-[0.99] relative animate-fadeIn"
                               >
                                 <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-200 shrink-0 shadow-3xs relative bg-slate-50 group-hover:scale-105 transition-transform duration-200">
@@ -1270,29 +1863,6 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           })}
                         </div>
                       )}
-                      {homeTotal > homePageSize && (
-                        <div className="flex items-center justify-between bg-white border border-slate-100 rounded-2xl px-3 py-2 text-[10px] font-bold text-slate-500">
-                          <button
-                            type="button"
-                            disabled={homePage <= 1 || isHomeLoading}
-                            onClick={() => setHomePage((page) => Math.max(1, page - 1))}
-                            className="px-2.5 py-1 rounded-full bg-slate-50 disabled:text-slate-300 disabled:bg-slate-50 text-slate-700 hover:bg-slate-100"
-                          >
-                            上一页
-                          </button>
-                          <span>
-                            {homePage} / {Math.max(1, Math.ceil(homeTotal / homePageSize))}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={homePage >= Math.ceil(homeTotal / homePageSize) || isHomeLoading}
-                            onClick={() => setHomePage((page) => page + 1)}
-                            className="px-2.5 py-1 rounded-full bg-slate-50 disabled:text-slate-300 disabled:bg-slate-50 text-slate-700 hover:bg-slate-100"
-                          >
-                            下一页
-                          </button>
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1319,75 +1889,200 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                     {/* Filter counters */}
                     <div className="grid grid-cols-3 gap-2 text-center">
                       <div className="bg-white rounded-xl p-2 border border-slate-100 shadow-xs">
-                        <div className="text-base font-extrabold text-slate-800">{items.length}</div>
+                        <div className="text-base font-extrabold text-slate-800">{inventoryTotal}</div>
                         <div className="text-[9px] text-slate-400 font-medium">总收录物品</div>
                       </div>
                       <div className="bg-white rounded-xl p-2 border border-slate-100 shadow-xs">
                         <div className="text-base font-extrabold text-emerald-600">
-                          {items.filter(it => !isItemOverdue(it)).length}
+                          {safeWarehouseCount}
                         </div>
                         <div className="text-[9px] text-slate-400 font-medium">安全状态中</div>
                       </div>
                       <div className="bg-white rounded-xl p-2 border border-slate-100 shadow-xs">
-                        <div className="text-base font-extrabold text-rose-500">{overdueItems.length}</div>
+                        <div className="text-base font-extrabold text-rose-500">{dueReminderCount}</div>
                         <div className="text-[9px] text-slate-400 font-medium">急需盘点确认</div>
                       </div>
                     </div>
 
+                    <div className="relative">
+                      <Search className="absolute left-3.5 top-3 w-4 h-4 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="在物品仓搜索名称、位置、备注..."
+                        value={warehouseKeyword}
+                        onChange={(e) => setWarehouseKeyword(e.target.value)}
+                        className="w-full bg-white hover:bg-slate-50/50 transition-all duration-200 focus:bg-white pl-10 pr-4 py-2.5 rounded-2xl text-[11.5px] font-semibold text-slate-800 placeholder-slate-400 border border-slate-200 shadow-3xs focus:outline-none focus:ring-2 focus:ring-indigo-600/10 focus:border-indigo-550"
+                      />
+                      {warehouseKeyword && (
+                        <button
+                          onClick={() => setWarehouseKeyword('')}
+                          className="absolute right-3 top-3 p-0.5 rounded-full bg-slate-200 text-slate-550 hover:text-slate-900"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex gap-1.5 overflow-x-auto py-1 scrollbar-none">
+                      <button
+                        onClick={() => setSelectedBackendCategory('all')}
+                        className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 ${
+                          selectedBackendCategory === 'all'
+                            ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        🗂️ 全部
+                      </button>
+                      {homeCategories.map((cat) => (
+                        <button
+                          key={cat.id}
+                          onClick={() => setSelectedBackendCategory(String(cat.id))}
+                          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-250 border flex items-center gap-1 ${
+                            selectedBackendCategory === String(cat.id)
+                              ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="text-[13px]">{cat.icon}</span>
+                          <span>{cat.name}</span>
+                        </button>
+                      ))}
+                    </div>
+
                     {/* Simple list in alphabetical / time order */}
                     <div className="space-y-2">
-                      {items.map((item) => {
-                        const itemPhoto = item.history[0]?.photos?.[0] || getDefaultPhotoForIcon(item.photo);
-                        return (
-                          <div
-                            key={item.id}
-                            onClick={() => setSelectedItem(item)}
-                            className="bg-white rounded-xl border border-slate-100 p-3 hover:border-slate-300 transition-colors cursor-pointer group flex items-center gap-3 relative"
-                          >
-                            <div className="w-11 h-11 rounded-xl overflow-hidden border border-slate-200 shrink-0 shadow-3xs relative bg-slate-50">
-                              <img
-                                src={itemPhoto}
-                                alt={item.name}
-                                className="w-full h-full object-cover animate-fadeIn"
-                                referrerPolicy="no-referrer"
-                              />
-                              <div className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-md bg-slate-900 text-white flex items-center justify-center p-0.5 shadow-xs border border-white scale-80">
-                                {renderIconComponent(item.photo, 'w-2 h-2 text-white')}
-                              </div>
-                            </div>
-                            
-                            <div className="flex-1 min-w-0 pr-2">
-                              <h5 className="text-xs font-extrabold text-slate-800 line-clamp-1">{item.name}</h5>
-                              <div className="flex items-center gap-1 text-[10px] text-slate-500 mt-0.5">
-                                <MapPin className="w-2.5 h-2.5 text-slate-400 shrink-0" />
-                                <span className="font-bold text-slate-900 truncate">{item.latestLocation}</span>
-                              </div>
-                            </div>
+                      <div className="flex items-center justify-between px-1">
+                        <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1">
+                          <Layers className="w-4 h-4 text-slate-500" />
+                          <span>完整物品列表 ({warehouseTotal})</span>
+                        </h4>
+                        <span className="text-[10px] text-slate-400 font-semibold font-mono">
+                          第 {warehousePage} 页
+                        </span>
+                      </div>
 
-                            <div className="text-[9px] text-slate-500 text-right shrink-0">
-                              <p className="font-mono font-medium text-slate-400">周期: {item.reminderDays}天</p>
-                              <p className="font-bold text-indigo-600 group-hover:text-indigo-800 transition-colors mt-0.5">查看足迹 &rarr;</p>
+                      {warehouseError ? (
+                        <div className="bg-rose-50 rounded-2xl border border-rose-100 p-5 text-center space-y-2">
+                          <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+                          <p className="text-xs font-bold text-rose-600">{warehouseError}</p>
+                        </div>
+                      ) : isWarehouseLoading ? (
+                        <div className="bg-white rounded-2xl border border-slate-100 p-5 text-center space-y-2">
+                          <div className="w-3 h-3 rounded-full bg-indigo-600 animate-pulse mx-auto"></div>
+                          <p className="text-xs font-semibold text-slate-500">正在同步真实物品仓...</p>
+                        </div>
+                      ) : warehouseItems.length === 0 ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center space-y-2">
+                          <Layers className="w-8 h-8 text-slate-300 mx-auto" />
+                          <p className="text-xs font-semibold text-slate-600">还没有记录物品，点击右上角 + 添加第一个物品。</p>
+                        </div>
+                      ) : (
+                        warehouseItems.map((item) => {
+                          const itemPhoto = resolveImageURL(item.cover_image) || getDefaultPhotoForIcon(backendCategoryToPrototypeCategory(item.category?.code));
+                          return (
+                            <div
+                              key={item.id}
+                              onClick={() => {
+                                setSelectedItem(null);
+                                setSelectedBackendItemID(item.id);
+                              }}
+                              className="bg-white rounded-xl border border-slate-100 p-3 hover:border-slate-300 transition-colors cursor-pointer group flex items-center gap-3 relative"
+                            >
+                              <div className="w-11 h-11 rounded-xl overflow-hidden border border-slate-200 shrink-0 shadow-3xs relative bg-slate-50">
+                                <img
+                                  src={itemPhoto}
+                                  alt={item.name}
+                                  className="w-full h-full object-cover animate-fadeIn"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <div className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-md bg-slate-900 text-white flex items-center justify-center p-0.5 shadow-xs border border-white scale-80">
+                                  <span className="text-[9px] leading-none">{item.category?.icon || '📦'}</span>
+                                </div>
+                              </div>
+                              
+                              <div className="flex-1 min-w-0 pr-2">
+                                <h5 className="text-xs font-extrabold text-slate-800 line-clamp-1">{item.name}</h5>
+                                <div className="flex items-center gap-1 text-[10px] text-slate-500 mt-0.5">
+                                  <MapPin className="w-2.5 h-2.5 text-slate-400 shrink-0" />
+                                  <span className="font-bold text-slate-900 truncate">{item.latest_location}</span>
+                                </div>
+                              </div>
+
+                              <div className="text-[9px] text-slate-500 text-right shrink-0">
+                                <p className="font-mono font-medium text-slate-400">周期: {item.reminder_days}天</p>
+                                <p className="font-bold text-indigo-600 group-hover:text-indigo-800 transition-colors mt-0.5">查看足迹 &rarr;</p>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })
+                      )}
                     </div>
+
+                    {warehouseTotal > warehousePageSize && (
+                      <div className="flex items-center justify-between bg-white border border-slate-100 rounded-2xl px-3 py-2 text-[10px] font-bold text-slate-500">
+                        <button
+                          type="button"
+                          disabled={warehousePage <= 1 || isWarehouseLoading}
+                          onClick={() => setWarehousePage((page) => Math.max(1, page - 1))}
+                          className="px-2.5 py-1 rounded-full bg-slate-50 disabled:text-slate-300 disabled:bg-slate-50 text-slate-700 hover:bg-slate-100"
+                        >
+                          上一页
+                        </button>
+                        <span>
+                          {warehousePage} / {Math.max(1, Math.ceil(warehouseTotal / warehousePageSize))}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={warehousePage >= Math.ceil(warehouseTotal / warehousePageSize) || isWarehouseLoading}
+                          onClick={() => setWarehousePage((page) => page + 1)}
+                          className="px-2.5 py-1 rounded-full bg-slate-50 disabled:text-slate-300 disabled:bg-slate-50 text-slate-700 hover:bg-slate-100"
+                        >
+                          下一页
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* --- TAB 3: REMINDERS LIST (待盘点列表) --- */}
                 {activeTab === 'reminders' && (
                   <div className="p-4 space-y-4 animate-fadeIn">
-                    <div>
-                      <h3 className="text-xl font-bold text-slate-900">到期监督面板</h3>
-                      <p className="text-[11px] text-slate-500">守护可能落入盲区忘记所在的物件</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <h3 className="text-xl font-bold text-slate-900">到期监督面板</h3>
+                        <p className="text-[11px] text-slate-500">守护可能落入盲区忘记所在的物件</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setRemindersRefreshTick((tick) => tick + 1)}
+                        className="w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 flex items-center justify-center hover:bg-slate-50"
+                        title="刷新提醒列表"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${isRemindersLoading ? 'animate-spin' : ''}`} />
+                      </button>
                     </div>
 
                     <div className="space-y-3">
-                      {items.map((item) => {
-                        const days = getDaysSinceLastConfirm(item);
-                        const isOverdue = isItemOverdue(item);
-                        const reminderPhoto = item.history[0]?.photos?.[0] || getDefaultPhotoForIcon(item.photo);
+                      {remindersError ? (
+                        <div className="bg-rose-50 rounded-2xl border border-rose-100 p-5 text-center space-y-2">
+                          <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+                          <p className="text-xs font-bold text-rose-600">{remindersError}</p>
+                        </div>
+                      ) : isRemindersLoading ? (
+                        <div className="bg-white rounded-2xl border border-slate-100 p-5 text-center space-y-2">
+                          <div className="w-3 h-3 rounded-full bg-indigo-600 animate-pulse mx-auto"></div>
+                          <p className="text-xs font-semibold text-slate-500">正在同步真实提醒列表...</p>
+                        </div>
+                      ) : reminderItems.length === 0 ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center space-y-2">
+                          <Bell className="w-8 h-8 text-slate-300 mx-auto" />
+                          <p className="text-xs font-semibold text-slate-600">当前没有到期需要核对的物品</p>
+                          <p className="text-[10px] text-slate-400">每件物品到达提醒时间后会出现在这里。</p>
+                        </div>
+                      ) : (
+                        reminderItems.map((item) => {
+                          const reminderPhoto = resolveImageURL(item.cover_image) || getDefaultPhotoForIcon(backendCategoryToPrototypeCategory(item.category?.code));
                         return (
                           <div
                             key={item.id}
@@ -1403,42 +2098,61 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                                     referrerPolicy="no-referrer"
                                   />
                                   <div className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-md bg-slate-900 text-white flex items-center justify-center p-0.5 shadow-xs border border-white scale-80">
-                                    {renderIconComponent(item.photo, 'w-2.5 h-2.5 text-white')}
+                                    <span className="text-[9px] leading-none">{item.category?.icon || '📦'}</span>
                                   </div>
                                 </div>
                                 <h5 className="text-xs font-bold text-slate-800 line-clamp-1">{item.name}</h5>
                               </div>
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
-                                isOverdue ? 'bg-rose-50 text-rose-600 animate-pulse' : 'bg-slate-100 text-slate-500'
-                              }`}>
-                                {isOverdue ? '需盘点' : '安全存放'}
+                              <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-rose-50 text-rose-600 animate-pulse">
+                                逾期 {item.overdue_days} 天
                               </span>
                             </div>
 
                             <div className="grid grid-cols-2 gap-2 text-[10px] bg-slate-50 p-2 rounded-lg py-1.5 border border-slate-200/50">
                               <div>
                                 <span className="text-slate-400 font-medium">上次确认: </span>
-                                <span className="font-bold text-slate-700">{days} 天前</span>
+                                <span className="font-bold text-slate-700">{formatDateTime(item.last_confirmed_at)}</span>
                               </div>
                               <div>
                                 <span className="text-slate-400 font-medium">盘点周期: </span>
-                                <span className="font-bold text-slate-700">{item.reminderDays} 天</span>
+                                <span className="font-bold text-slate-700">{item.reminder_days} 天</span>
+                              </div>
+                              <div className="col-span-2">
+                                <span className="text-slate-400 font-medium">提醒时间: </span>
+                                <span className="font-bold text-slate-700">{formatDateTime(item.next_remind_at)}</span>
                               </div>
                             </div>
 
-                            <div className="flex items-center justify-between text-[11px] bg-indigo-50/20 px-2 py-1 rounded">
-                              <span className="text-slate-500 text-[10.5px]">当前存放: <b>{item.latestLocation}</b></span>
+                            <div className="space-y-2 text-[11px] bg-indigo-50/20 px-2 py-2 rounded">
+                              <span className="text-slate-500 text-[10.5px] block">当前存放: <b>{item.latest_location}</b></span>
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                  onClick={() => handleBackendConfirm(item.id, 'reminder')}
+                                  disabled={isBackendItemMutating}
+                                  className="py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors disabled:text-slate-300"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  原地核对完好
+                                </button>
                               <button
-                                onClick={() => handleConfirmStillHere(item.id)}
-                                className="text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5 shrink-0 transition-colors"
+                                  onClick={() => openBackendUpdateLocation({
+                                    id: item.id,
+                                    name: item.name,
+                                    location: item.latest_location,
+                                    source: 'reminder',
+                                  })}
+                                  disabled={isBackendItemMutating}
+                                  className="py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition-colors disabled:text-slate-300"
                               >
-                                <Check className="w-3.5 h-3.5" />
-                                完好在
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                  更新位置
                               </button>
+                              </div>
                             </div>
                           </div>
                         );
-                      })}
+                      })
+                      )}
                     </div>
                   </div>
                 )}
@@ -1528,6 +2242,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                       onClick={() => {
                         setActiveTab(tab.id as any);
                         setSelectedItem(null); // Clear item detailed views when navigating to avoid overlapping
+                        setSelectedBackendItemID(null);
                       }}
                       className={`flex flex-col items-center justify-center flex-1 h-full py-1.5 transition-colors relative ${
                         isActive ? 'text-indigo-600 font-extrabold' : 'text-slate-400 font-medium'
@@ -1542,7 +2257,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           transition={{ type: 'spring', stiffness: 380, damping: 30 }}
                         />
                       )}
-                      {tab.id === 'reminders' && overdueItems.length > 0 && (
+                      {tab.id === 'reminders' && reminderItems.length > 0 && (
                         <span className="absolute top-2 right-5 w-2 h-2 rounded-full bg-rose-500"></span>
                       )}
                     </button>
@@ -1552,6 +2267,36 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
 
               {/* iOS Home Indicator Bar */}
               <div className="absolute bottom-1 left-1/2 -translate-x-1/2 w-28 h-1 bg-slate-900 rounded-full z-30 opacity-70 pointer-events-none"></div>
+
+              {/* ================= OVERLAY SCREEN: REAL BACKEND ITEM DETAIL VIEW ================= */}
+              <AnimatePresence>
+                {selectedBackendItemID && (
+                  <RealItemDetailOverlay
+                    item={backendItemDetail}
+                    history={backendItemHistory}
+                    isLoading={isBackendDetailLoading}
+                    isMutating={isBackendItemMutating}
+                    error={backendDetailError}
+                    onClose={() => {
+                      setSelectedBackendItemID(null);
+                      setBackendItemDetail(null);
+                      setBackendItemHistory([]);
+                      setBackendDetailError(null);
+                    }}
+                    onOpenImage={setActiveLightboxImage}
+                    onConfirm={() => selectedBackendItemID && handleBackendConfirm(selectedBackendItemID, 'detail')}
+                    onOpenUpdate={() => {
+                      if (!backendItemDetail) return;
+                      openBackendUpdateLocation({
+                        id: backendItemDetail.id,
+                        name: backendItemDetail.name,
+                        location: backendItemDetail.latest_location,
+                        source: 'detail',
+                      });
+                    }}
+                  />
+                )}
+              </AnimatePresence>
 
               {/* ================= OVERLAY SCREEN: ITEM DETAIL VIEW (物品详情及历史时间轴) ================= */}
               <AnimatePresence>
@@ -1979,7 +2724,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                                 type="file"
                                 accept="image/*"
                                 multiple
-                                onChange={(e) => handlePhotoUpload(e, true)}
+                                onChange={(e) => handlePhotoUpload(e, 'new')}
                                 className="hidden"
                               />
                             </label>
@@ -2048,6 +2793,134 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                           className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-colors"
                         >
                           {isCreatingItem ? '正在同步到后端...' : '录入保管箱 & 记录初始轨迹 →'}
+                        </button>
+                      </div>
+                    </motion.form>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* ================= OVERLAY DIALOG: REAL BACKEND UPDATE LOCATION DRAWER ================= */}
+              <AnimatePresence>
+                {backendUpdateTarget && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="absolute inset-0 bg-black/60 z-55 flex items-end justify-center backdrop-blur-xs"
+                  >
+                    <motion.form
+                      initial={{ y: '100%' }}
+                      animate={{ y: 0 }}
+                      exit={{ y: '100%' }}
+                      transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+                      onSubmit={handleBackendUpdateLocation}
+                      className="w-full bg-[#F8FAFC] rounded-t-[36px] max-h-[90%] overflow-y-auto p-5 pb-10 space-y-4 border-t border-slate-200 text-slate-800"
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900">更新真实物品位置</h4>
+                          <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+                            物品: {backendUpdateTarget.name}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={closeBackendUpdateLocation}
+                          className="p-1 rounded-full bg-slate-200 text-slate-600"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-3.5 text-xs">
+                        <div className="space-y-1">
+                          <label className="font-semibold text-slate-700 block">
+                            新存放位置 <span className="text-rose-500">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            placeholder={backendUpdateTarget.location || '如：书房柜子第二层左侧'}
+                            value={backendUpdateLocation}
+                            onChange={(e) => setBackendUpdateLocation(e.target.value)}
+                            required
+                            className="w-full bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="font-semibold text-slate-700 block">本次位置备注（选填）</label>
+                          <input
+                            type="text"
+                            placeholder="如：移动后放在盒子最右侧，旁边是充电器"
+                            value={backendUpdateNote}
+                            onChange={(e) => setBackendUpdateNote(e.target.value)}
+                            className="w-full bg-white px-3.5 py-2.5 rounded-xl border border-slate-200 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5 bg-amber-50/50 p-3.5 rounded-2xl border border-amber-200/60">
+                          <label className="font-bold text-slate-800 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5 text-amber-950">
+                              <Camera className="w-4 h-4 text-amber-600 animate-pulse" />
+                              <span>新的存放照片</span>
+                            </span>
+                            <span className="text-[9px] bg-amber-500 text-white font-black px-1.5 py-0.5 rounded-md">
+                              建议
+                            </span>
+                          </label>
+                          <div className="text-[10px] text-amber-900 border border-amber-200/60 bg-amber-100/20 p-2 rounded-xl leading-relaxed">
+                            建议上传新的存放照片，方便之后查找。
+                          </div>
+
+                          <label className="h-12 border border-dashed border-amber-300 rounded-xl flex flex-col items-center justify-center bg-white cursor-pointer hover:bg-slate-50 transition-colors">
+                            <Upload className="w-3.5 h-3.5 text-amber-600 mb-0.5" />
+                            <span className="text-[9px] font-bold text-amber-700">选择本地照片</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={(e) => handlePhotoUpload(e, 'backend-update')}
+                              className="hidden"
+                            />
+                          </label>
+
+                          {backendUpdatePhotos.length > 0 ? (
+                            <div className="grid grid-cols-4 gap-1.5 pt-1.5 animate-fadeIn">
+                              {backendUpdatePhotos.map((photo, i) => (
+                                <div key={i} className="relative w-full aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-100 group">
+                                  <img src={photo.src} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                  <button
+                                    type="button"
+                                    onClick={() => setBackendUpdatePhotos((prev) => prev.filter((_, idx) => idx !== i))}
+                                    className="absolute -top-1 -right-1 w-5 h-5 bg-black/70 rounded-full flex items-center justify-center text-white scale-75"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-center py-2 border border-dashed border-slate-200 rounded-xl mt-1.5 text-[9.5px] text-slate-500 bg-slate-50">
+                              可不上传照片，但更新位置时建议补充最新现场图。
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {backendUpdateError && (
+                        <div className="bg-rose-50 border border-rose-100 text-rose-600 text-xs font-bold px-3 py-2 rounded-2xl">
+                          {backendUpdateError}
+                        </div>
+                      )}
+
+                      <div className="pt-2">
+                        <button
+                          type="submit"
+                          disabled={isBackendUpdatingLocation}
+                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-colors"
+                        >
+                          {isBackendUpdatingLocation ? '正在同步新位置...' : '提交位置更新 →'}
                         </button>
                       </div>
                     </motion.form>
@@ -2141,7 +3014,7 @@ function MainApp({ currentUser, onLogout }: MainAppProps) {
                                 type="file"
                                 accept="image/*"
                                 multiple
-                                onChange={(e) => handlePhotoUpload(e, false)}
+                                onChange={(e) => handlePhotoUpload(e, 'mock-update')}
                                 className="hidden"
                               />
                             </label>
