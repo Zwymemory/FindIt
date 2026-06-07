@@ -94,6 +94,22 @@ type itemDetailResponse struct {
 	LatestRecord    *recordInfo  `json:"latest_record"`
 }
 
+type reminderItem struct {
+	ID              uint64       `json:"id"`
+	Category        categoryInfo `json:"category"`
+	Name            string       `json:"name"`
+	Remark          string       `json:"remark"`
+	CoverImage      string       `json:"cover_image"`
+	LatestLocation  string       `json:"latest_location"`
+	ReminderEnabled bool         `json:"reminder_enabled"`
+	ReminderDays    int          `json:"reminder_days"`
+	LastConfirmedAt *time.Time   `json:"last_confirmed_at"`
+	NextRemindAt    *time.Time   `json:"next_remind_at"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+	OverdueDays     int          `json:"overdue_days"`
+}
+
 type categoryInfo struct {
 	ID          uint64 `json:"id"`
 	Name        string `json:"name"`
@@ -255,6 +271,80 @@ func (h *ItemHandler) UpdateLocation(c *gin.Context) {
 	}
 
 	response.Success(c, record, http.StatusCreated)
+}
+
+func (h *ItemHandler) Confirm(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	itemID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, "invalid item id", http.StatusBadRequest)
+		return
+	}
+
+	item, err := h.findOwnedItem(c, userID, itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, response.CodeNotFound, "item not found", http.StatusNotFound)
+			return
+		}
+
+		response.Error(c, response.CodeInternalError, "failed to query item", http.StatusInternalServerError)
+		return
+	}
+
+	note := strings.TrimSpace(c.PostForm("note"))
+	if note == "" {
+		note = "原地确认，物品仍在该位置"
+	}
+
+	photos, err := saveUploadedPhotos(c)
+	if err != nil {
+		response.Error(c, response.CodeInvalidParams, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	record, err := h.confirmInTransaction(c, item, userID, note, photos)
+	if err != nil {
+		cleanupSavedPhotos(photos)
+		response.Error(c, response.CodeInternalError, "failed to confirm item", http.StatusInternalServerError)
+		return
+	}
+
+	response.Success(c, record, http.StatusCreated)
+}
+
+func (h *ItemHandler) Reminders(c *gin.Context) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		response.Error(c, response.CodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	now := time.Now()
+	var items []model.Item
+	if err := h.db.WithContext(c.Request.Context()).
+		Preload("Category").
+		Where("user_id = ?", userID).
+		Where("reminder_enabled = ?", true).
+		Where("next_remind_at IS NOT NULL").
+		Where("next_remind_at <= ?", now).
+		Order("next_remind_at ASC").
+		Find(&items).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "failed to query reminders", http.StatusInternalServerError)
+		return
+	}
+
+	reminders := make([]reminderItem, 0, len(items))
+	for _, item := range items {
+		reminders = append(reminders, toReminderItem(item, now))
+	}
+
+	response.Success(c, reminders)
 }
 
 func (h *ItemHandler) List(c *gin.Context) {
@@ -594,6 +684,73 @@ func (h *ItemHandler) updateLocationInTransaction(c *gin.Context, item model.Ite
 	return &record, nil
 }
 
+func (h *ItemHandler) confirmInTransaction(c *gin.Context, item model.Item, userID uint64, note string, photos []savedPhoto) (*recordInfo, error) {
+	now := time.Now()
+	var nextRemindAt *time.Time
+	if item.ReminderEnabled {
+		next := now.AddDate(0, 0, item.ReminderDays)
+		nextRemindAt = &next
+	}
+
+	photoURL := ""
+	if len(photos) > 0 {
+		photoURL = photos[0].URL
+	}
+
+	locationRecord := model.LocationRecord{
+		ItemID:    item.ID,
+		UserID:    userID,
+		Location:  item.LatestLocation,
+		PhotoURL:  photoURL,
+		Note:      note,
+		Type:      "confirm",
+		CreatedAt: now,
+	}
+	itemImages := make([]model.ItemImage, 0, len(photos))
+
+	err := h.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&locationRecord).Error; err != nil {
+			return err
+		}
+
+		for i, photo := range photos {
+			itemImages = append(itemImages, model.ItemImage{
+				ItemID:    item.ID,
+				RecordID:  &locationRecord.ID,
+				UserID:    userID,
+				ImageURL:  photo.URL,
+				IsCover:   i == 0,
+				Sort:      i + 1,
+				CreatedAt: now,
+			})
+		}
+		if len(itemImages) > 0 {
+			if err := tx.Create(&itemImages).Error; err != nil {
+				return err
+			}
+		}
+
+		updates := map[string]any{
+			"last_confirmed_at": now,
+			"next_remind_at":    nextRemindAt,
+		}
+		if len(photos) > 0 {
+			updates["cover_image"] = photos[0].URL
+		}
+
+		return tx.Model(&model.Item{}).
+			Where("id = ? AND user_id = ?", item.ID, userID).
+			Updates(updates).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	images := toImageInfos(itemImages)
+	record := toRecordInfo(locationRecord, images)
+	return &record, nil
+}
+
 func currentUserID(c *gin.Context) (uint64, bool) {
 	value, ok := c.Get(middleware.UserIDKey)
 	if !ok {
@@ -840,6 +997,32 @@ func toItemDetail(item model.Item, images []model.ItemImage, latestRecord *recor
 		UpdatedAt:       item.UpdatedAt,
 		Images:          toImageInfos(images),
 		LatestRecord:    latestRecord,
+	}
+}
+
+func toReminderItem(item model.Item, now time.Time) reminderItem {
+	overdueDays := 0
+	if item.NextRemindAt != nil {
+		overdueDays = int(now.Sub(*item.NextRemindAt).Hours() / 24)
+		if overdueDays < 0 {
+			overdueDays = 0
+		}
+	}
+
+	return reminderItem{
+		ID:              item.ID,
+		Category:        toCategoryInfo(item.Category),
+		Name:            item.Name,
+		Remark:          item.Remark,
+		CoverImage:      item.CoverImage,
+		LatestLocation:  item.LatestLocation,
+		ReminderEnabled: item.ReminderEnabled,
+		ReminderDays:    item.ReminderDays,
+		LastConfirmedAt: item.LastConfirmedAt,
+		NextRemindAt:    item.NextRemindAt,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+		OverdueDays:     overdueDays,
 	}
 }
 

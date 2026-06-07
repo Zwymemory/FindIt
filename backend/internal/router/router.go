@@ -57,6 +57,8 @@ func New(deps Dependencies) *gin.Engine {
 		api.GET("/items/:id", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Detail)
 		api.GET("/items/:id/history", middleware.Auth(deps.Config.JWT.Secret), itemHandler.History)
 		api.POST("/items/:id/location", middleware.Auth(deps.Config.JWT.Secret), itemHandler.UpdateLocation)
+		api.POST("/items/:id/confirm", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Confirm)
+		api.GET("/reminders", middleware.Auth(deps.Config.JWT.Secret), itemHandler.Reminders)
 	}
 
 	r.Static("/uploads", "./uploads")
